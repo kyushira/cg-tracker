@@ -1,0 +1,91 @@
+name: CI & Pages
+
+# check   : typecheck + tests + build on every branch push and every PR (the pre-launch gate)
+# publish : after check passes on a push, publish to the gh-pages branch:
+#             main        -> https://kyushira.github.io/cg-tracker/
+#             any branch  -> https://kyushira.github.io/cg-tracker/preview/<branch-slug>/
+#           (slug = branch name lowercased, runs of non [a-z0-9] become "-",
+#            e.g. feature/branch-previews -> feature-branch-previews)
+# cleanup : deleting a branch removes its preview
+# Pages must be set to "Deploy from a branch: gh-pages / (root)".
+on:
+  push:
+    branches-ignore: [gh-pages]
+  pull_request:
+  delete:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    if: github.event_name != 'delete'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: check-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # tsc --noEmit && vite build, same as the publish job
+      - run: npm run build
+
+  publish:
+    name: publish
+    needs: check
+    # pushes in this repo only (never PRs, so fork code never gets a write token)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Publish to gh-pages
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          base="https://kyushira.github.io/cg-tracker"
+          if [ "$REF_NAME" = main ]; then
+            bash .github/scripts/pages-publish.sh root dist
+            url="$base/"
+          else
+            bash .github/scripts/pages-publish.sh preview dist "$REF_NAME"
+            url="$base/preview/$(bash .github/scripts/pages-publish.sh slug "$REF_NAME")/"
+          fi
+          echo "### Published: $url" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published: $url (Pages takes about a minute to refresh)"
+
+  cleanup:
+    name: remove preview
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Remove preview
+        env:
+          DELETED: ${{ github.event.ref }}
+        run: bash .github/scripts/pages-publish.sh remove "$DELETED"
