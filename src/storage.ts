@@ -2,7 +2,7 @@
 // directly, so a Supabase-backed store (or a local store + sync queue) can be
 // dropped in later with the same interface.
 
-import { emptyData, type AppData } from './domain';
+import { emptyData, type AppData, type Scan } from './domain';
 
 export interface DataStore {
   load(): AppData;
@@ -14,6 +14,7 @@ export interface DataStore {
  * Storage key is namespaced by the page path. Branch previews are served from
  * the same origin as production (https://<user>.github.io/cg-tracker/preview/<b>/),
  * so without this a preview would read and overwrite the live floor data.
+ * This prevents accidents only; it is not a security boundary (same origin).
  */
 export function storageKey(pathname: string): string {
   const dir = pathname.replace(/[^/]*$/, ''); // drop "index.html" if present
@@ -25,12 +26,22 @@ function isAppData(x: unknown): x is AppData {
   return !!d && d.version === 1 && Array.isArray(d.scans) && !!d.meta && typeof d.meta === 'object' && !!d.settings && typeof d.settings === 'object';
 }
 
+function isScan(x: unknown): x is Scan {
+  const s = x as Scan;
+  return !!s && typeof s.id === 'string' && typeof s.cg === 'string' && s.cg !== '' && Number.isFinite(s.at);
+}
+
 export function parseData(raw: string | null): AppData {
   if (!raw) return emptyData();
   const parsed: unknown = JSON.parse(raw);
   if (!isAppData(parsed)) throw new Error('Saved data has an unknown format');
   const base = emptyData();
-  return { ...base, ...parsed, settings: { ...base.settings, ...parsed.settings } };
+  // One malformed row must not crash the whole app: drop it (LocalStore keeps
+  // a backup of the raw data when anything was dropped).
+  const scans = parsed.scans
+    .filter(isScan)
+    .map((s) => ({ ...s, truck: typeof s.truck === 'string' ? s.truck : '', door: typeof s.door === 'string' ? s.door : '' }));
+  return { ...base, ...parsed, scans, settings: { ...base.settings, ...parsed.settings } };
 }
 
 export class LocalStore implements DataStore {
@@ -42,7 +53,13 @@ export class LocalStore implements DataStore {
   load(): AppData {
     const raw = this.ls.getItem(this.key);
     try {
-      return parseData(raw);
+      const data = parseData(raw);
+      const rawCount = raw ? (JSON.parse(raw) as AppData).scans.length : 0;
+      if (raw && data.scans.length !== rawCount) {
+        this.ls.setItem(`${this.key}:dropped:${Date.now()}`, raw);
+        console.error(`cg-tracker: dropped ${rawCount - data.scans.length} unreadable scan(s); raw data backed up`);
+      }
+      return data;
     } catch (e) {
       // Never silently overwrite data we can't read: park it under a backup key.
       if (raw) {

@@ -17,7 +17,9 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE)
-      .then((c) => c.addAll(FILES))
+      // cache: 'reload' bypasses the HTTP cache, so a stale index.html can't be
+      // paired with this build's assets.
+      .then((c) => c.addAll(FILES.map((u) => new Request(u, { cache: 'reload' }))))
       .then(() => self.skipWaiting()),
   );
 });
@@ -46,16 +48,21 @@ self.addEventListener('fetch', (event) => {
   if (!mine(url)) return;
 
   if (req.mode === 'navigate') {
+    // Network first so new deploys show up, but give up after 3s: on weak
+    // warehouse Wi-Fi the cached app opens instead of a spinning page.
+    const cached = () => caches.match('./', { cacheName: CACHE }).then((r) => r || caches.match(req));
+    const network = fetch(req).then((res) => {
+      if (res.ok) {
+        const copy = res.clone();
+        caches.open(CACHE).then((c) => c.put('./', copy));
+      }
+      return res;
+    });
+    const timeout = new Promise((resolve) => setTimeout(resolve, 3000)).then(cached);
     event.respondWith(
-      fetch(req)
-        .then((res) => {
-          if (res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put('./', copy));
-          }
-          return res;
-        })
-        .catch(() => caches.match('./', { cacheName: CACHE }).then((r) => r || caches.match(req))),
+      Promise.race([network, timeout])
+        .then((r) => r || network)
+        .catch(() => cached().then((r) => r || network)),
     );
     return;
   }

@@ -114,9 +114,12 @@ export function summarizeCg(data: AppData, cg: string): CgSummary | null {
   const expected = expectedFor(data, cg);
   const complete = scans.length >= expected;
   const meta = data.meta[cg];
-  // A mark only counts while the CG is still complete (e.g. a deleted scan
-  // puts it back to pending).
-  const mark = complete ? meta?.mark : undefined;
+  const completedAt = complete ? scans[expected - 1].at : null;
+  // A mark only counts while the CG is still complete, and only for the
+  // completion it was made on: if a scan is deleted and the CG is completed
+  // again later, it shows as complete (not silently staged/dispatched).
+  const mark =
+    completedAt !== null && meta?.mark && (meta.markAt ?? 0) >= completedAt ? meta.mark : undefined;
   return {
     cg,
     scans,
@@ -126,7 +129,7 @@ export function summarizeCg(data: AppData, cg: string): CgSummary | null {
     status: mark ?? (complete ? 'complete' : 'pending'),
     firstAt: scans[0].at,
     lastAt: scans[scans.length - 1].at,
-    completedAt: complete ? scans[expected - 1].at : null,
+    completedAt,
     markAt: mark ? (meta?.markAt ?? null) : null,
   };
 }

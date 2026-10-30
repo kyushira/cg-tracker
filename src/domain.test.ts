@@ -500,14 +500,21 @@ describe('setMark', () => {
     expect(data.meta['8000123'].markAt).toBeUndefined();
   });
 
-  it('reverts a marked CG to pending when a scan is deleted, then restores the mark when re-scanned', () => {
+  it('reverts a marked CG to pending when a scan is deleted, and a later re-completion is not silently re-marked', () => {
     let data = setMark(completedCg(), '8000123', 'staged', T0 + 5 * MIN);
     data = deleteScan(data, 'a2');
     expect(summarizeCg(data, '8000123')?.status).toBe('pending');
     expect(summarizeCg(data, '8000123')?.markAt).toBeNull();
 
     data = scan(data, '8000123', T0 + 7 * MIN, 'a3');
-    expect(summarizeCg(data, '8000123')?.status).toBe('staged');
+    expect(summarizeCg(data, '8000123')?.status).toBe('complete');
+    expect(summarizeCg(data, '8000123')?.markAt).toBeNull();
+  });
+
+  it('ignores a mark made before the current completion', () => {
+    // e.g. marked, a cart deleted, then completed again with a later scan
+    const data = setMark(completedCg(), '8000123', 'dispatched', T0 - MIN);
+    expect(summarizeCg(data, '8000123')?.status).toBe('complete');
   });
 
   it('does not mutate the input', () => {

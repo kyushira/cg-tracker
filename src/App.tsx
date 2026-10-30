@@ -20,7 +20,6 @@ import {
   summarizeAll,
   summarizeCg,
   toCsv,
-  undoLastScan,
   updateScan,
   emptyData,
   type AppData,
@@ -59,17 +58,20 @@ function useData(store: DataStore) {
   const ref = useRef(data);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Save first, then show: the screen never shows a scan that isn't stored.
   const commit = useCallback(
-    (fn: (d: AppData) => AppData) => {
+    (fn: (d: AppData) => AppData): AppData | null => {
       const next = fn(ref.current);
-      ref.current = next;
-      setData(next);
       try {
         store.save(next);
-        setSaveError(null);
       } catch (e) {
-        setSaveError(`Could not save to this device (${(e as Error).message}). Export a CSV now.`);
+        setSaveError(`NOT SAVED: this device's storage failed (${(e as Error).message}). Export a CSV now.`);
+        cue('warn');
+        return null;
       }
+      setSaveError(null);
+      ref.current = next;
+      setData(next);
       return next;
     },
     [store],
@@ -143,6 +145,7 @@ export default function App() {
   const record = (cg: string) => {
     const { truck, door } = ref.current.settings;
     const next = commit((d) => addScan(d, { cg, truck, door }, Date.now(), newId()));
+    if (!next) return setBanner(null);
     const s = summarizeCg(next, cg)!;
     const first = s.scans[0];
     let b: Banner;
@@ -193,7 +196,7 @@ export default function App() {
       confirmLabel: 'Undo scan',
       danger: true,
       onConfirm: () => {
-        commit(undoLastScan);
+        if (!commit((d) => deleteScan(d, last.id))) return;
         setBanner({ kind: 'info', cg: last.cg, title: 'UNDONE', detail: `Removed last scan of CG ${last.cg}`, key: Date.now() });
       },
     });
@@ -609,7 +612,9 @@ function CgDetail(props: {
   const [editing, setEditing] = useState<string | null>(null);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !editing && onClose();
+    // Escape closes the sheet, unless a confirm dialog is on top of it (that one handles its own Escape).
+    const onKey = (e: KeyboardEvent) =>
+      e.key === 'Escape' && !editing && !document.querySelector('[data-testid=confirm]') && onClose();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose, editing]);
@@ -695,7 +700,8 @@ function EditScan(props: {
   const [cg, setCg] = useState(scan.cg);
   const [truck, setTruck] = useState(scan.truck);
   const [door, setDoor] = useState(scan.door);
-  const [at, setAt] = useState(toLocalInput(scan.at));
+  const original = toLocalInput(scan.at);
+  const [at, setAt] = useState(original);
   const ms = fromLocalInput(at);
   const valid = normalizeCg(cg) !== '' && ms !== null;
   return (
@@ -703,7 +709,10 @@ function EditScan(props: {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (valid) onSave({ cg, truck, door, at: ms! });
+          if (!valid) return;
+          // Only touch the time if it was edited (the input drops milliseconds,
+          // and the local-time round trip is ambiguous on DST change nights).
+          onSave(at === original ? { cg, truck, door } : { cg, truck, door, at: ms! });
         }}
       >
         <label>CG<input value={cg} onChange={(e) => setCg(e.target.value)} inputMode="numeric" /></label>
