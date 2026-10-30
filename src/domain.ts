@@ -13,16 +13,24 @@ export const DEFAULT_EXPECTED = 2;
 export const MIN_EXPECTED = 1;
 export const MAX_EXPECTED = 9;
 export const DUP_WINDOW_MS = 60_000;
-export const CG_PREFIX = '8000';
+export const CG_PATTERN = /^\d{4}$/;
 export const DEFAULT_AGING_HOURS = 24;
 export const AGING_WARN_RATIO = 0.75;
+
+/** Standard ops chips, in display order. Anything else is a free-text "Others" entry. */
+export const STANDARD_OPS = ['10', '20', '30', '60', '70', '80'] as const;
+export const OPS_OTHER_MAX = 20;
+
+export type McType = 'big' | 'small' | 'open';
+export const MC_TYPES: McType[] = ['big', 'small', 'open'];
+export const MC_LABEL: Record<McType, string> = { big: 'Big MC', small: 'Small MC', open: 'Open MC' };
 
 export interface Scan {
   id: string;
   cg: string;
   at: number; // epoch ms
-  truck: string;
-  door: string;
+  ops: string[]; // e.g. ['10', '30'] or ['10', 'Rework']
+  mc: McType | '';
 }
 
 export type ArchiveMark = 'staged' | 'dispatched';
@@ -33,10 +41,16 @@ export interface CgMeta {
   markAt?: number;
 }
 
-export interface Settings {
+/** Sticky receive form: stays selected between scans. */
+export interface Sticky {
+  ops: string[]; // selected standard ops codes
+  otherOn: boolean; // "Others" chip selected
+  otherText: string; // its free text
+  mc: McType | '';
+}
+
+export interface Settings extends Sticky {
   agingHours: number;
-  truck: string; // sticky between scans
-  door: string; // sticky between scans
 }
 
 export interface AppData {
@@ -61,7 +75,7 @@ export interface CgSummary {
   markAt: number | null;
 }
 
-export type WarningKind = 'prefix' | 'over' | 'recent';
+export type WarningKind = 'over' | 'recent';
 export interface ScanWarning {
   kind: WarningKind;
   message: string;
@@ -72,8 +86,36 @@ export function emptyData(): AppData {
     version: 1,
     scans: [],
     meta: {},
-    settings: { agingHours: DEFAULT_AGING_HOURS, truck: '', door: '' },
+    settings: { agingHours: DEFAULT_AGING_HOURS, ops: [], otherOn: false, otherText: '', mc: '' },
   };
+}
+
+/** The ops list a scan records for the current sticky selection, standard codes in display order. */
+export function opsFromSticky(s: Pick<Sticky, 'ops' | 'otherOn' | 'otherText'>): string[] {
+  const std = STANDARD_OPS.filter((o) => s.ops.includes(o));
+  if (!s.otherOn) return [...std];
+  const other = s.otherText.trim().slice(0, OPS_OTHER_MAX) || 'Others';
+  return [...std, other];
+}
+
+export function cleanOps(ops: unknown): string[] {
+  if (!Array.isArray(ops)) return [];
+  const out: string[] = [];
+  for (const o of ops) {
+    const v = typeof o === 'string' ? o.trim().slice(0, OPS_OTHER_MAX) : '';
+    if (v && !out.includes(v)) out.push(v);
+  }
+  // standard codes first, in display order; free text after
+  const std = STANDARD_OPS.filter((o) => out.includes(o));
+  return [...std, ...out.filter((o) => !(STANDARD_OPS as readonly string[]).includes(o))];
+}
+
+export function cleanMc(mc: unknown): McType | '' {
+  return MC_TYPES.includes(mc as McType) ? (mc as McType) : '';
+}
+
+export function opsText(ops: string[]): string {
+  return ops.join(';');
 }
 
 // ---------------------------------------------------------------- input
@@ -91,6 +133,20 @@ export function normalizeCg(raw: string): string {
   s = s.replace(/\s+/g, '');
   s = s.replace(/^[^0-9A-Za-z]+|[^0-9A-Za-z]+$/g, '');
   return s.toUpperCase();
+}
+
+export function isValidCg(cg: string): boolean {
+  return CG_PATTERN.test(cg);
+}
+
+/** Normalize scanner input and check it is a CG number (exactly 4 digits). */
+export function parseCg(raw: string): { cg: string; error: string | null } {
+  const cg = normalizeCg(raw);
+  if (!cg) return { cg, error: null }; // empty Enter: ignore quietly
+  if (!isValidCg(cg)) {
+    return { cg, error: `"${cg.slice(0, 24)}" is not a CG number. A CG is exactly 4 digits.` };
+  }
+  return { cg, error: null };
 }
 
 export function clampExpected(n: number): number {
@@ -204,12 +260,6 @@ export function searchCgs(list: CgSummary[], query: string): CgSummary[] {
 /** Reasons to ask "are you sure?" before recording a scan. Empty = just save it. */
 export function checkScan(data: AppData, cg: string, now: number): ScanWarning[] {
   const warnings: ScanWarning[] = [];
-  if (!cg.startsWith(CG_PREFIX)) {
-    warnings.push({
-      kind: 'prefix',
-      message: `CG ${cg} does not start with ${CG_PREFIX}. Wrong label scanned?`,
-    });
-  }
   const scans = scansFor(data, cg);
   const expected = expectedFor(data, cg);
   if (scans.length >= expected) {
@@ -234,19 +284,17 @@ export function checkScan(data: AppData, cg: string, now: number): ScanWarning[]
 
 export interface ScanInput {
   cg: string;
-  truck?: string;
-  door?: string;
+  ops?: string[];
+  mc?: McType | '';
 }
 
+/** Records one cart. Throws if the CG isn't exactly 4 digits (the UI checks first). */
 export function addScan(data: AppData, input: ScanInput, now: number, id: string): AppData {
   const cg = normalizeCg(input.cg);
-  if (!cg) throw new Error('empty CG');
-  const truck = (input.truck ?? '').trim();
-  const door = (input.door ?? '').trim();
+  if (!isValidCg(cg)) throw new Error(`invalid CG "${cg}"`);
   return {
     ...data,
-    scans: [...data.scans, { id, cg, at: now, truck, door }],
-    settings: { ...data.settings, truck, door },
+    scans: [...data.scans, { id, cg, at: now, ops: cleanOps(input.ops ?? []), mc: cleanMc(input.mc) }],
   };
 }
 
@@ -262,7 +310,7 @@ export function undoLastScan(data: AppData): AppData {
 export function updateScan(
   data: AppData,
   id: string,
-  patch: Partial<Pick<Scan, 'cg' | 'truck' | 'door' | 'at'>>,
+  patch: Partial<Pick<Scan, 'cg' | 'ops' | 'mc' | 'at'>>,
 ): AppData {
   return {
     ...data,
@@ -271,10 +319,10 @@ export function updateScan(
       const next = { ...s, ...patch };
       if (patch.cg !== undefined) {
         next.cg = normalizeCg(patch.cg);
-        if (!next.cg) throw new Error('empty CG');
+        if (!isValidCg(next.cg)) throw new Error(`invalid CG "${next.cg}"`);
       }
-      if (patch.truck !== undefined) next.truck = patch.truck.trim();
-      if (patch.door !== undefined) next.door = patch.door.trim();
+      if (patch.ops !== undefined) next.ops = cleanOps(patch.ops);
+      if (patch.mc !== undefined) next.mc = cleanMc(patch.mc);
       return next;
     }),
   };
@@ -305,8 +353,17 @@ export function setAgingHours(data: AppData, hours: number): AppData {
   return { ...data, settings: { ...data.settings, agingHours: h } };
 }
 
-export function setSticky(data: AppData, truck: string, door: string): AppData {
-  return { ...data, settings: { ...data.settings, truck, door } };
+export function setSticky(data: AppData, patch: Partial<Sticky>): AppData {
+  const s = { ...data.settings, ...patch };
+  return {
+    ...data,
+    settings: {
+      ...s,
+      ops: STANDARD_OPS.filter((o) => s.ops.includes(o)),
+      otherText: s.otherText.slice(0, OPS_OTHER_MAX),
+      mc: cleanMc(s.mc),
+    },
+  };
 }
 
 // ---------------------------------------------------------------- export
@@ -326,8 +383,8 @@ export const CSV_HEADER = [
   'cg',
   'cart_no',
   'scanned_at_utc',
-  'truck',
-  'dock_door',
+  'ops',
+  'mc_type',
   'cg_carts_received',
   'cg_carts_expected',
   'cg_status',
@@ -346,8 +403,8 @@ export function toCsv(data: AppData): string {
           s.cg,
           i + 1,
           iso(scan.at),
-          scan.truck,
-          scan.door,
+          opsText(scan.ops),
+          scan.mc ? MC_LABEL[scan.mc] : '',
           s.count,
           s.expected,
           s.status,

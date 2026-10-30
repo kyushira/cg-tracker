@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { addScan, emptyData, type AppData } from './domain';
+import { addScan, emptyData, summarizeCg, type AppData, type McType } from './domain';
 import { LocalStore, MemoryStore, parseData, storageKey } from './storage';
 
 // Minimal in-memory Storage for the node environment (no jsdom).
@@ -33,10 +33,21 @@ const KEY = 'cg-tracker:v1:/cg-tracker/';
 
 function sampleData(): AppData {
   let data = emptyData();
-  data = addScan(data, { cg: '8000123', truck: 'T1', door: 'D2' }, T0, 'a1');
-  data = addScan(data, { cg: '8000123', truck: 'T1', door: 'D2' }, T0 + 60_000, 'a2');
+  data = addScan(data, { cg: '1234', ops: ['10', '30'], mc: 'big' as McType }, T0, 'a1');
+  data = addScan(data, { cg: '1234', ops: ['10', '30'], mc: 'big' as McType }, T0 + 60_000, 'a2');
   return data;
 }
+
+// A round-1 save (truck/door instead of ops/MC type). Its CG is a legacy 7-digit number.
+const ROUND1_JSON = JSON.stringify({
+  version: 1,
+  scans: [
+    { id: 'r1', cg: '8000123', at: T0, truck: 'T1', door: 'D2' },
+    { id: 'r2', cg: '8000123', at: T0 + 60_000, truck: 'T1', door: 'D2' },
+  ],
+  meta: { '8000123': { expected: 2 } },
+  settings: { agingHours: 12, truck: 'T1', door: 'D2' },
+});
 
 // ---------------------------------------------------------------- storageKey
 
@@ -76,18 +87,67 @@ describe('parseData', () => {
   });
 
   it('fills missing settings fields with defaults', () => {
-    const raw = JSON.stringify({ version: 1, scans: [], meta: {}, settings: { truck: 'T9' } });
-    expect(parseData(raw).settings).toEqual({ agingHours: 24, truck: 'T9', door: '' });
+    const raw = JSON.stringify({ version: 1, scans: [], meta: {}, settings: { otherOn: true } });
+    expect(parseData(raw).settings).toEqual({ agingHours: 24, ops: [], otherOn: true, otherText: '', mc: '' });
   });
 
   it('fills every settings field when settings is an empty object', () => {
     const raw = JSON.stringify({ version: 1, scans: [], meta: {}, settings: {} });
-    expect(parseData(raw).settings).toEqual({ agingHours: 24, truck: '', door: '' });
+    expect(parseData(raw).settings).toEqual({ agingHours: 24, ops: [], otherOn: false, otherText: '', mc: '' });
   });
 
   it('keeps a stored agingHours instead of overwriting it with the default', () => {
     const raw = JSON.stringify({ version: 1, scans: [], meta: {}, settings: { agingHours: 8 } });
     expect(parseData(raw).settings.agingHours).toBe(8);
+  });
+
+  it('keeps only standard ops in settings, in display order', () => {
+    const raw = JSON.stringify({
+      version: 1,
+      scans: [],
+      meta: {},
+      settings: { ops: ['30', 'Rework', '99', '10'] },
+    });
+    expect(parseData(raw).settings.ops).toEqual(['10', '30']);
+  });
+
+  it('clips settings otherText to 20 characters and rejects a non-boolean otherOn', () => {
+    const raw = JSON.stringify({
+      version: 1,
+      scans: [],
+      meta: {},
+      settings: { otherOn: 'yes', otherText: 'z'.repeat(30) },
+    });
+    const s = parseData(raw).settings;
+    expect(s.otherOn).toBe(false);
+    expect(s.otherText).toBe('z'.repeat(20));
+  });
+
+  it('cleans an invalid settings mc to an empty string', () => {
+    const raw = JSON.stringify({ version: 1, scans: [], meta: {}, settings: { mc: 'Big MC' } });
+    expect(parseData(raw).settings.mc).toBe('');
+  });
+
+  it('keeps a legacy 7-digit CG on a stored scan so it still loads', () => {
+    const raw = JSON.stringify({
+      version: 1,
+      scans: [{ id: 'old', cg: '8000123', at: T0, ops: ['10'], mc: 'small' }],
+      meta: {},
+      settings: {},
+    });
+    const d = parseData(raw);
+    expect(d.scans).toHaveLength(1);
+    expect(d.scans[0].cg).toBe('8000123');
+  });
+
+  it('keeps a plain-object meta as it is', () => {
+    const raw = JSON.stringify({ version: 1, scans: [], meta: { '1234': { expected: 3 } }, settings: {} });
+    expect(parseData(raw).meta).toEqual({ '1234': { expected: 3 } });
+  });
+
+  it('replaces an array meta with an empty object', () => {
+    const raw = JSON.stringify({ version: 1, scans: [], meta: [], settings: {} });
+    expect(parseData(raw).meta).toEqual({});
   });
 
   it('throws on a version other than 1', () => {
@@ -113,12 +173,58 @@ describe('parseData', () => {
     expect(() => parseData('{not json')).toThrow();
   });
 
-  it('BUG: rejects meta: null (src/storage.ts:25 accepts it because typeof null === "object")', () => {
-    // BUG: src/storage.ts:25 — isAppData checks `typeof d.meta === 'object'`, which is true for null.
-    // Expected: parseData throws 'unknown format'. Actual: returns data with meta === null, and the
-    // next summarizeCg/expectedFor call dereferences data.meta[cg] and throws a TypeError.
+  // A broken meta must not wipe the scans: it is reset to {} (scans are what matter).
+  it('meta: null becomes {} instead of throwing', () => {
     const raw = JSON.stringify({ version: 1, scans: [], meta: null, settings: {} });
-    expect(() => parseData(raw)).toThrow('unknown format');
+    expect(parseData(raw).meta).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------- round-1 migration
+
+describe('round-1 data migration', () => {
+  it('loads a literal round-1 save without throwing and keeps both scans', () => {
+    const d = parseData(ROUND1_JSON);
+    expect(d.scans.map((s) => s.id)).toEqual(['r1', 'r2']);
+  });
+
+  it('gives migrated scans empty ops and an empty mc, and drops truck/door', () => {
+    const d = parseData(ROUND1_JSON);
+    expect(d.scans[0]).toEqual({ id: 'r1', cg: '8000123', at: T0, ops: [], mc: '' });
+    expect(d.scans[1]).toEqual({ id: 'r2', cg: '8000123', at: T0 + 60_000, ops: [], mc: '' });
+    for (const s of d.scans) {
+      expect(s).not.toHaveProperty('truck');
+      expect(s).not.toHaveProperty('door');
+    }
+  });
+
+  it('turns round-1 settings into the round-2 shape, keeping agingHours and dropping truck/door', () => {
+    const d = parseData(ROUND1_JSON);
+    expect(d.settings).toEqual({ agingHours: 12, ops: [], otherOn: false, otherText: '', mc: '' });
+    expect(d.settings).not.toHaveProperty('truck');
+    expect(d.settings).not.toHaveProperty('door');
+  });
+
+  it('defaults agingHours to 24 when round-1 settings had none', () => {
+    const raw = JSON.stringify({ version: 1, scans: [], meta: {}, settings: { truck: 'T1', door: 'D2' } });
+    expect(parseData(raw).settings.agingHours).toBe(24);
+  });
+
+  it('keeps round-1 meta and the migrated scans still summarize as complete', () => {
+    const d = parseData(ROUND1_JSON);
+    expect(d.meta).toEqual({ '8000123': { expected: 2 } });
+    expect(summarizeCg(d, '8000123')?.status).toBe('complete');
+  });
+
+  it('LocalStore loads round-1 data without backing it up', () => {
+    const ls = new FakeStorage();
+    ls.setItem(KEY, ROUND1_JSON);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const d = new LocalStore(KEY, ls).load();
+    expect(d.scans).toHaveLength(2);
+    expect(ls.keysList()).toEqual([KEY]);
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
 
@@ -154,7 +260,7 @@ describe('LocalStore', () => {
   });
 
   it('loads empty data for a corrupt JSON value and keeps the raw string under a corrupt key', () => {
-    const raw = '{"version":1,"scans":[' ; // truncated JSON
+    const raw = '{"version":1,"scans":[';  // truncated JSON
     ls.setItem(KEY, raw);
 
     expect(new LocalStore(KEY, ls).load()).toEqual(emptyData());

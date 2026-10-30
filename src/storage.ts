@@ -2,7 +2,7 @@
 // directly, so a Supabase-backed store (or a local store + sync queue) can be
 // dropped in later with the same interface.
 
-import { emptyData, type AppData, type Scan } from './domain';
+import { cleanMc, cleanOps, emptyData, STANDARD_OPS, type AppData, type Scan, type Settings } from './domain';
 
 export interface DataStore {
   load(): AppData;
@@ -23,7 +23,7 @@ export function storageKey(pathname: string): string {
 
 function isAppData(x: unknown): x is AppData {
   const d = x as AppData;
-  return !!d && d.version === 1 && Array.isArray(d.scans) && !!d.meta && typeof d.meta === 'object' && !!d.settings && typeof d.settings === 'object';
+  return !!d && d.version === 1 && Array.isArray(d.scans) && !!d.settings && typeof d.settings === 'object';
 }
 
 function isScan(x: unknown): x is Scan {
@@ -38,10 +38,21 @@ export function parseData(raw: string | null): AppData {
   const base = emptyData();
   // One malformed row must not crash the whole app: drop it (LocalStore keeps
   // a backup of the raw data when anything was dropped).
-  const scans = parsed.scans
+  // Round 1 saved truck/door instead of ops/MC type; those fields are simply
+  // dropped (test data only) and missing ops/mc default to empty.
+  const scans: Scan[] = parsed.scans
     .filter(isScan)
-    .map((s) => ({ ...s, truck: typeof s.truck === 'string' ? s.truck : '', door: typeof s.door === 'string' ? s.door : '' }));
-  return { ...base, ...parsed, scans, settings: { ...base.settings, ...parsed.settings } };
+    .map((s) => ({ id: s.id, cg: s.cg, at: s.at, ops: cleanOps(s.ops), mc: cleanMc(s.mc) }));
+  const ps = parsed.settings as Partial<Settings>;
+  const settings: Settings = {
+    agingHours: Number.isFinite(ps.agingHours) && ps.agingHours! > 0 ? ps.agingHours! : base.settings.agingHours,
+    ops: cleanOps(ps.ops).filter((o) => (STANDARD_OPS as readonly string[]).includes(o)),
+    otherOn: ps.otherOn === true,
+    otherText: typeof ps.otherText === 'string' ? ps.otherText.slice(0, 20) : '',
+    mc: cleanMc(ps.mc),
+  };
+  const meta = parsed.meta && typeof parsed.meta === 'object' && !Array.isArray(parsed.meta) ? parsed.meta : {};
+  return { version: 1, scans, meta, settings };
 }
 
 export class LocalStore implements DataStore {

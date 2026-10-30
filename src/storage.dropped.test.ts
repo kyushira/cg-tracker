@@ -15,15 +15,23 @@ function memStorage(): Storage {
   };
 }
 
-const good = { id: 'a', cg: '8000123', at: 1000, truck: 'T1', door: '4' };
+const good = { id: 'a', cg: '1234', at: 1000, ops: ['10'], mc: 'big' };
 const raw = (scans: unknown[]) =>
-  JSON.stringify({ version: 1, scans, meta: {}, settings: { agingHours: 24, truck: '', door: '' } });
+  JSON.stringify({ version: 1, scans, meta: {}, settings: { agingHours: 24, ops: [], otherOn: false, otherText: '', mc: '' } });
 
 describe('malformed scan rows', () => {
-  it('parseData drops rows without a CG or a valid time and fills missing truck/door', () => {
-    const d = parseData(raw([good, { id: 'b', cg: '', at: 1 }, { id: 'c', cg: '8000', at: 'x' }, null, { id: 'd', cg: '8000999', at: 5 }]));
+  it('parseData drops rows without a CG or a valid time and keeps the valid ones', () => {
+    const d = parseData(
+      raw([good, { id: 'b', cg: '', at: 1 }, { id: 'c', cg: '1234', at: 'x' }, null, { id: 'd', cg: '9999', at: 5 }]),
+    );
     expect(d.scans.map((s) => s.id)).toEqual(['a', 'd']);
-    expect(d.scans[1]).toMatchObject({ truck: '', door: '' });
+  });
+
+  it('parseData gives a round-1 row with truck/door empty ops and mc, and drops the old keys', () => {
+    const d = parseData(raw([{ id: 'r', cg: '1234', at: 1000, truck: 'T1', door: '4' }]));
+    expect(d.scans[0]).toEqual({ id: 'r', cg: '1234', at: 1000, ops: [], mc: '' });
+    expect(d.scans[0]).not.toHaveProperty('truck');
+    expect(d.scans[0]).not.toHaveProperty('door');
   });
 
   it('LocalStore keeps a backup of the raw data when rows are dropped', () => {
