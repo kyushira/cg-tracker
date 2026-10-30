@@ -27,7 +27,8 @@ export const MC_LABEL: Record<McType, string> = { big: 'Big MC', small: 'Small M
 
 export interface Scan {
   id: string;
-  cg: string;
+  cg: string; // CG key = last 4 digits, used for matching and display
+  rawCode: string; // full code as entered/scanned (e.g. 80001234821, or 4821 if typed)
   at: number; // epoch ms
   ops: string[]; // e.g. ['10', '30'] or ['10', 'Rework']
   mc: McType | '';
@@ -135,18 +136,36 @@ export function normalizeCg(raw: string): string {
   return s.toUpperCase();
 }
 
+/** A CG key (what the team calls a CG): exactly 4 digits. */
 export function isValidCg(cg: string): boolean {
   return CG_PATTERN.test(cg);
 }
 
-/** Normalize scanner input and check it is a CG number (exactly 4 digits). */
-export function parseCg(raw: string): { cg: string; error: string | null } {
-  const cg = normalizeCg(raw);
-  if (!cg) return { cg, error: null }; // empty Enter: ignore quietly
-  if (!isValidCg(cg)) {
-    return { cg, error: `"${cg.slice(0, 24)}" is not a CG number. A CG is exactly 4 digits.` };
-  }
-  return { cg, error: null };
+export const BARCODE_PREFIX = '8000';
+const BARCODE_PATTERN = /^8000\d+$/;
+
+export interface ParsedCg {
+  cg: string; // the CG key: last 4 digits ('' if input was empty)
+  rawCode: string; // what was entered after noise trimming (full barcode when scanned)
+  error: string | null;
+}
+
+/**
+ * Normalize scanner/hand input into a CG key.
+ * Accepted: exactly 4 digits (typed), or a scanned barcode "8000" + more digits
+ * (longer than 4). The key is the last 4 digits, so a typed 4821 and a scanned
+ * 80001234821 are the same CG.
+ */
+export function parseCg(raw: string): ParsedCg {
+  const code = normalizeCg(raw);
+  if (!code) return { cg: '', rawCode: '', error: null }; // empty Enter: ignore quietly
+  if (CG_PATTERN.test(code)) return { cg: code, rawCode: code, error: null };
+  if (BARCODE_PATTERN.test(code)) return { cg: code.slice(-4), rawCode: code, error: null };
+  return {
+    cg: '',
+    rawCode: code,
+    error: `"${code.slice(0, 24)}" is not a CG. Type the 4-digit CG or scan the full ${BARCODE_PREFIX}… barcode.`,
+  };
 }
 
 export function clampExpected(n: number): number {
@@ -248,10 +267,12 @@ export function agingLevel(firstAt: number, now: number, agingHours: number): Ag
 
 /** Case-insensitive substring search over CG numbers, exact match first. */
 export function searchCgs(list: CgSummary[], query: string): CgSummary[] {
-  const q = normalizeCg(query);
+  const p = parseCg(query);
+  // A pasted/scanned full barcode searches by its CG key; otherwise substring.
+  const q = !p.error && p.cg ? p.cg : normalizeCg(query);
   if (!q) return [];
   return list
-    .filter((s) => s.cg.includes(q))
+    .filter((s) => s.cg.includes(q) || s.scans.some((x) => x.rawCode.includes(q)))
     .sort((a, b) => Number(b.cg === q) - Number(a.cg === q) || b.lastAt - a.lastAt);
 }
 
@@ -288,13 +309,22 @@ export interface ScanInput {
   mc?: McType | '';
 }
 
-/** Records one cart. Throws if the CG isn't exactly 4 digits (the UI checks first). */
+function parseOrThrow(input: string): ParsedCg {
+  const p = parseCg(input);
+  if (p.error || !p.cg) throw new Error(`invalid CG "${p.rawCode}"`);
+  return p;
+}
+
+/**
+ * Records one cart. `input.cg` may be a typed 4-digit CG or a full scanned
+ * 8000… barcode; the scan is keyed by the last 4 digits and keeps the full
+ * code as rawCode. Throws on anything else (the UI checks first).
+ */
 export function addScan(data: AppData, input: ScanInput, now: number, id: string): AppData {
-  const cg = normalizeCg(input.cg);
-  if (!isValidCg(cg)) throw new Error(`invalid CG "${cg}"`);
+  const { cg, rawCode } = parseOrThrow(input.cg);
   return {
     ...data,
-    scans: [...data.scans, { id, cg, at: now, ops: cleanOps(input.ops ?? []), mc: cleanMc(input.mc) }],
+    scans: [...data.scans, { id, cg, rawCode, at: now, ops: cleanOps(input.ops ?? []), mc: cleanMc(input.mc) }],
   };
 }
 
@@ -318,8 +348,9 @@ export function updateScan(
       if (s.id !== id) return s;
       const next = { ...s, ...patch };
       if (patch.cg !== undefined) {
-        next.cg = normalizeCg(patch.cg);
-        if (!isValidCg(next.cg)) throw new Error(`invalid CG "${next.cg}"`);
+        const p = parseOrThrow(patch.cg);
+        next.cg = p.cg;
+        next.rawCode = p.rawCode;
       }
       if (patch.ops !== undefined) next.ops = cleanOps(patch.ops);
       if (patch.mc !== undefined) next.mc = cleanMc(patch.mc);
@@ -383,6 +414,7 @@ export const CSV_HEADER = [
   'cg',
   'cart_no',
   'scanned_at_utc',
+  'raw_code',
   'ops',
   'mc_type',
   'cg_carts_received',
@@ -403,6 +435,7 @@ export function toCsv(data: AppData): string {
           s.cg,
           i + 1,
           iso(scan.at),
+          scan.rawCode,
           opsText(scan.ops),
           scan.mc ? MC_LABEL[scan.mc] : '',
           s.count,

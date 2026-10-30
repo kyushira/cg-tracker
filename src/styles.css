@@ -193,6 +193,7 @@ svg { flex: none; }
 .tag.none { color: var(--muted); font-weight: 700; }
 .tag.ops { border-color: var(--brand); color: var(--brand); background: color-mix(in srgb, var(--brand) 10%, var(--surface)); }
 .first { color: var(--muted); font-weight: 700; }
+.raw { display: block; font: 700 13px/1.2 var(--mono); color: var(--muted); margin: 0; word-break: break-all; }
 .tag.mc { background: #e7edf5; color: var(--ink); border-color: #e7edf5; }
 
 .carts { display: flex; flex-direction: column; gap: 6px; }

@@ -29,7 +29,7 @@ describe('malformed scan rows', () => {
 
   it('parseData gives a round-1 row with truck/door empty ops and mc, and drops the old keys', () => {
     const d = parseData(raw([{ id: 'r', cg: '1234', at: 1000, truck: 'T1', door: '4' }]));
-    expect(d.scans[0]).toEqual({ id: 'r', cg: '1234', at: 1000, ops: [], mc: '' });
+    expect(d.scans[0]).toEqual({ id: 'r', cg: '1234', rawCode: '1234', at: 1000, ops: [], mc: '' });
     expect(d.scans[0]).not.toHaveProperty('truck');
     expect(d.scans[0]).not.toHaveProperty('door');
   });

@@ -190,8 +190,8 @@ describe('round-1 data migration', () => {
 
   it('gives migrated scans empty ops and an empty mc, and drops truck/door', () => {
     const d = parseData(ROUND1_JSON);
-    expect(d.scans[0]).toEqual({ id: 'r1', cg: '8000123', at: T0, ops: [], mc: '' });
-    expect(d.scans[1]).toEqual({ id: 'r2', cg: '8000123', at: T0 + 60_000, ops: [], mc: '' });
+    expect(d.scans[0]).toEqual({ id: 'r1', cg: '8000123', rawCode: '8000123', at: T0, ops: [], mc: '' });
+    expect(d.scans[1]).toEqual({ id: 'r2', cg: '8000123', rawCode: '8000123', at: T0 + 60_000, ops: [], mc: '' });
     for (const s of d.scans) {
       expect(s).not.toHaveProperty('truck');
       expect(s).not.toHaveProperty('door');
@@ -225,6 +225,38 @@ describe('round-1 data migration', () => {
     expect(ls.keysList()).toEqual([KEY]);
     expect(errorSpy).not.toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------- rawCode
+
+describe('parseData rawCode', () => {
+  const withScans = (scans: unknown[]) => JSON.stringify({ version: 1, scans, meta: {}, settings: {} });
+
+  it('keeps a stored full scanned code as rawCode, with the 4-digit cg key', () => {
+    const d = parseData(withScans([{ id: 's', cg: '4821', rawCode: '80001234821', at: T0, ops: [], mc: '' }]));
+    expect(d.scans[0].cg).toBe('4821');
+    expect(d.scans[0].rawCode).toBe('80001234821');
+  });
+
+  it('gives a scan saved before rawCode existed rawCode equal to its cg', () => {
+    const d = parseData(withScans([{ id: 'old', cg: '4821', at: T0, ops: [], mc: '' }]));
+    expect(d.scans[0].rawCode).toBe('4821');
+  });
+
+  it('falls back to cg when rawCode is an empty string or not a string', () => {
+    const d = parseData(
+      withScans([
+        { id: 'e', cg: '4821', rawCode: '', at: T0 },
+        { id: 'n', cg: '4822', rawCode: 42, at: T0 },
+      ]),
+    );
+    expect(d.scans.map((s) => s.rawCode)).toEqual(['4821', '4822']);
+  });
+
+  it('round-trips a scan with a barcode rawCode through JSON', () => {
+    const data = addScan(emptyData(), { cg: '80001234821' }, T0, 'a1');
+    expect(parseData(JSON.stringify(data))).toEqual(data);
   });
 });
 

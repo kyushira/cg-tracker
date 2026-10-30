@@ -112,38 +112,48 @@ describe('normalizeCg', () => {
 // ---------------------------------------------------------------- parseCg / isValidCg
 
 describe('parseCg', () => {
-  it('accepts exactly 4 digits with no error', () => {
-    expect(parseCg('1234')).toEqual({ cg: '1234', error: null });
+  it('accepts exactly 4 typed digits, with rawCode equal to the typed digits', () => {
+    expect(parseCg('4821')).toEqual({ cg: '4821', rawCode: '4821', error: null });
   });
 
-  it('rejects 3 digits with an error that says 4 digits', () => {
-    const r = parseCg('123');
-    expect(r.cg).toBe('123');
-    expect(r.error).toContain('4 digits');
+  it('treats 8000 typed alone as a 4-digit CG, not a barcode', () => {
+    expect(parseCg('8000')).toEqual({ cg: '8000', rawCode: '8000', error: null });
   });
 
-  it('rejects 5 digits with an error that says 4 digits', () => {
+  it('takes the last 4 digits of a scanned 8000 barcode as the CG key and keeps the full code as rawCode', () => {
+    expect(parseCg('80001234821')).toEqual({ cg: '4821', rawCode: '80001234821', error: null });
+  });
+
+  it('keeps leading zeros in the key of a short 8000 barcode', () => {
+    expect(parseCg('80001')).toEqual({ cg: '0001', rawCode: '80001', error: null });
+  });
+
+  it('cleans noisy scanner input from a scanned barcode', () => {
+    expect(parseCg('  ]C1*80001234821*\r\n')).toEqual({ cg: '4821', rawCode: '80001234821', error: null });
+  });
+
+  it.each(['123', '12345', '90001234', 'AB12', '8000AB12'])(
+    'rejects %s with an error that mentions 4-digit and 8000 and returns an empty cg',
+    (raw) => {
+      const r = parseCg(raw);
+      expect(r.cg).toBe('');
+      expect(r.error).toContain('4-digit');
+      expect(r.error).toContain('8000');
+    },
+  );
+
+  it('rejects a 5-digit code that does not start with 8000', () => {
     const r = parseCg('12345');
-    expect(r.cg).toBe('12345');
-    expect(r.error).toContain('4 digits');
-  });
-
-  it('rejects letters', () => {
-    const r = parseCg('AB12');
-    expect(r.cg).toBe('AB12');
+    expect(r.cg).toBe('');
     expect(r.error).not.toBeNull();
   });
 
-  it('cleans noisy scanner input down to the 4 digits with no error', () => {
-    expect(parseCg('  ]C1*1234*\r\n')).toEqual({ cg: '1234', error: null });
-  });
-
   it('treats empty input as a quiet no-op (no error)', () => {
-    expect(parseCg('')).toEqual({ cg: '', error: null });
+    expect(parseCg('')).toEqual({ cg: '', rawCode: '', error: null });
   });
 
   it('treats whitespace-only input as a quiet no-op (no error)', () => {
-    expect(parseCg(' \r\n ')).toEqual({ cg: '', error: null });
+    expect(parseCg(' \r\n ')).toEqual({ cg: '', rawCode: '', error: null });
   });
 });
 
@@ -225,6 +235,50 @@ describe('addScan', () => {
     expect(summarizeCg(data, '1234')?.count).toBe(1);
   });
 
+  it('stores a scanned barcode under its last 4 digits and keeps the full code as rawCode', () => {
+    const data = addScan(emptyData(), { cg: '80001234821' }, T0, 'a1');
+    expect(data.scans[0]).toEqual({ id: 'a1', cg: '4821', rawCode: '80001234821', at: T0, ops: [], mc: '' });
+    expect(summarizeCg(data, '4821')?.count).toBe(1);
+  });
+
+  it('cleans a noisy scanner barcode before keying it', () => {
+    const data = addScan(emptyData(), { cg: '  ]C1*80001234821*\r\n' }, T0, 'a1');
+    expect(data.scans[0].cg).toBe('4821');
+    expect(data.scans[0].rawCode).toBe('80001234821');
+  });
+
+  it('stores a typed 4-digit CG with rawCode equal to the CG', () => {
+    const data = addScan(emptyData(), { cg: '4821' }, T0, 'a1');
+    expect(data.scans[0].cg).toBe('4821');
+    expect(data.scans[0].rawCode).toBe('4821');
+  });
+
+  it('stores typed 8000 as a 4-digit CG, not a barcode', () => {
+    const data = addScan(emptyData(), { cg: '8000' }, T0, 'a1');
+    expect(data.scans[0].cg).toBe('8000');
+    expect(data.scans[0].rawCode).toBe('8000');
+  });
+
+  it('counts a typed 4821 and a scanned 80001234821 as the same CG, complete at two carts', () => {
+    let data = scan(emptyData(), '4821', T0, 'a1');
+    data = addScan(data, { cg: '80001234821' }, T0 + 5 * MIN, 'a2');
+    const s = summarizeCg(data, '4821');
+    expect(s?.count).toBe(2);
+    expect(s?.status).toBe('complete');
+    expect(s?.scans.map((x) => x.rawCode)).toEqual(['4821', '80001234821']);
+  });
+
+  it('counts a scanned barcode followed by the typed CG as the same CG', () => {
+    let data = addScan(emptyData(), { cg: '80001234821' }, T0, 'a1');
+    data = scan(data, '4821', T0 + 5 * MIN, 'a2');
+    expect(summarizeCg(data, '4821')?.count).toBe(2);
+  });
+
+  it('rejects a 5-digit code without the 8000 prefix and an 8-digit code that is not an 8000 barcode', () => {
+    expect(() => addScan(emptyData(), { cg: '12345' }, T0, 'a1')).toThrow('invalid CG');
+    expect(() => addScan(emptyData(), { cg: '90001234' }, T0, 'a1')).toThrow('invalid CG');
+  });
+
   it.each(['123', '12345', 'ABCD'])('throws for the non-4-digit CG %s', (cg) => {
     expect(() => addScan(emptyData(), { cg }, T0, 'a1')).toThrow('invalid CG');
   });
@@ -239,7 +293,7 @@ describe('addScan', () => {
 
   it('stores ops and mc on the scan, with ops cleaned', () => {
     const data = addScan(emptyData(), { cg: '1234', ops: [' 30 ', '10'], mc: 'small' }, T0, 'a1');
-    expect(data.scans[0]).toEqual({ id: 'a1', cg: '1234', at: T0, ops: ['10', '30'], mc: 'small' });
+    expect(data.scans[0]).toEqual({ id: 'a1', cg: '1234', rawCode: '1234', at: T0, ops: ['10', '30'], mc: 'small' });
   });
 
   it('stores an invalid mc as an empty string', () => {
@@ -249,7 +303,7 @@ describe('addScan', () => {
 
   it('stores empty ops and mc when neither is given', () => {
     const data = addScan(emptyData(), { cg: '1234' }, T0, 'a1');
-    expect(data.scans[0]).toEqual({ id: 'a1', cg: '1234', at: T0, ops: [], mc: '' });
+    expect(data.scans[0]).toEqual({ id: 'a1', cg: '1234', rawCode: '1234', at: T0, ops: [], mc: '' });
   });
 
   it('does not touch settings (ops/mc are sticky only via setSticky)', () => {
@@ -550,6 +604,27 @@ describe('updateScan', () => {
     expect(summarizeCg(next, '9999')?.count).toBe(1);
   });
 
+  it('sets both cg and rawCode when a scanned barcode is patched in', () => {
+    const data = scan(emptyData(), '1111', T0, 'a1');
+    const next = updateScan(data, 'a1', { cg: '  ]C1*80009876543*\r\n' });
+    expect(next.scans[0].cg).toBe('6543');
+    expect(next.scans[0].rawCode).toBe('80009876543');
+  });
+
+  it('sets rawCode to the typed 4 digits when a typed CG is patched in', () => {
+    const data = addScan(emptyData(), { cg: '80001111111' }, T0, 'a1');
+    const next = updateScan(data, 'a1', { cg: '2222' });
+    expect(next.scans[0].cg).toBe('2222');
+    expect(next.scans[0].rawCode).toBe('2222');
+  });
+
+  it('leaves rawCode alone when the patch has no cg', () => {
+    const data = addScan(emptyData(), { cg: '80001234821' }, T0, 'a1');
+    const next = updateScan(data, 'a1', { ops: ['20'] });
+    expect(next.scans[0].cg).toBe('4821');
+    expect(next.scans[0].rawCode).toBe('80001234821');
+  });
+
   it('re-derives status when a scan moves into a CG that already has one cart', () => {
     let data = scan(emptyData(), '1111', T0, 'a1');
     data = scan(data, '2222', T0, 'b1');
@@ -835,6 +910,26 @@ describe('searchCgs', () => {
     expect(searchCgs(list(), '7777')).toEqual([]);
   });
 
+  describe('with scanned barcodes', () => {
+    function barcodeList() {
+      let data = addScan(emptyData(), { cg: '80001234821' }, T0, 'x1'); // key 4821, rawCode 80001234821
+      data = scan(data, '1111', T0 + MIN, 'x2');
+      return summarizeAll(data);
+    }
+
+    it('searches a full barcode by its CG key', () => {
+      expect(searchCgs(barcodeList(), '80001234821').map((s) => s.cg)).toEqual(['4821']);
+    });
+
+    it('matches a substring that only appears in the stored rawCode', () => {
+      expect(searchCgs(barcodeList(), '1234').map((s) => s.cg)).toEqual(['4821']);
+    });
+
+    it('still matches the CG key by substring', () => {
+      expect(searchCgs(barcodeList(), '482').map((s) => s.cg)).toEqual(['4821']);
+    });
+  });
+
   it('breaks ties between equal matches by most recent scan first', () => {
     let data = scan(emptyData(), '1555', T0, 'a');
     data = scan(data, '1556', T0 + MIN, 'b');
@@ -932,11 +1027,12 @@ describe('toCsv', () => {
     return data;
   }
 
-  it('has the round-2 header columns', () => {
+  it('has the header columns, with raw_code after scanned_at_utc', () => {
     expect(CSV_HEADER).toEqual([
       'cg',
       'cart_no',
       'scanned_at_utc',
+      'raw_code',
       'ops',
       'mc_type',
       'cg_carts_received',
@@ -969,27 +1065,27 @@ describe('toCsv', () => {
 
   it('writes the expected values for a complete CG row, with ops joined by ; and the mc label', () => {
     const row = toCsv(fixture()).split('\r\n')[1];
-    expect(row).toBe(['1111', '1', iso(T0), '10;30', 'Big MC', '2', '2', 'complete', iso(T0 + MIN), ''].join(','));
+    expect(row).toBe(['1111', '1', iso(T0), '1111', '10;30', 'Big MC', '2', '2', 'complete', iso(T0 + MIN), ''].join(','));
   });
 
   it('writes an empty completed_at for a pending CG and the Open MC label', () => {
     const row = toCsv(fixture()).split('\r\n')[3];
-    expect(row).toBe(['2222', '1', iso(T0 + 2 * MIN), '20', 'Open MC', '1', '2', 'pending', '', ''].join(','));
+    expect(row).toBe(['2222', '1', iso(T0 + 2 * MIN), '2222', '20', 'Open MC', '1', '2', 'pending', '', ''].join(','));
   });
 
   it('writes empty ops and mc_type cells for a scan with neither', () => {
     const data = scan(emptyData(), '1234', T0, 'a1');
     const cells = toCsv(data).split('\r\n')[1].split(',');
-    expect(cells[3]).toBe('');
     expect(cells[4]).toBe('');
+    expect(cells[5]).toBe('');
   });
 
   it('writes the staged status and marked_at timestamp', () => {
     const data = setMark(fixture(), '1111', 'staged', T0 + 5 * MIN);
     const row = toCsv(data).split('\r\n')[1];
     const cells = row.split(',');
-    expect(cells[7]).toBe('staged');
-    expect(cells[9]).toBe(iso(T0 + 5 * MIN));
+    expect(cells[8]).toBe('staged');
+    expect(cells[10]).toBe(iso(T0 + 5 * MIN));
   });
 
   it('groups rows by CG oldest CG first and numbers carts 1..n per CG', () => {
@@ -1003,6 +1099,13 @@ describe('toCsv', () => {
       return `${c[0]}#${c[1]}`;
     });
     expect(cgAndCart).toEqual(['2222#1', '1111#1', '1111#2', '1111#3']);
+  });
+
+  it('writes the full scanned code in raw_code and the last 4 digits in cg', () => {
+    const data = addScan(emptyData(), { cg: '80001234821', ops: ['10'] }, T0, 'a1');
+    const cells = toCsv(data).split('\r\n')[1].split(',');
+    expect(cells[0]).toBe('4821');
+    expect(cells[3]).toBe('80001234821');
   });
 
   it('quotes an ops text that contains a comma', () => {
@@ -1019,7 +1122,7 @@ describe('toCsv', () => {
 
   it('leaves a plain ops value unquoted', () => {
     const data = scan(emptyData(), '1234', T0, 'a1', ['30']);
-    expect(toCsv(data).split('\r\n')[1].split(',')[3]).toBe('30');
+    expect(toCsv(data).split('\r\n')[1].split(',')[4]).toBe('30');
   });
 
   it.each(['=', '+', '-', '@'])(
@@ -1027,7 +1130,7 @@ describe('toCsv', () => {
     (lead) => {
       const text = `${lead}1+1`;
       const data = scan(emptyData(), '1234', T0, 'a1', [text]);
-      const cell = toCsv(data).split('\r\n')[1].split(',')[3];
+      const cell = toCsv(data).split('\r\n')[1].split(',')[4];
       expect(cell).toBe(`'${text}`);
     },
   );

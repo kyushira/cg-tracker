@@ -42,7 +42,14 @@ export function parseData(raw: string | null): AppData {
   // dropped (test data only) and missing ops/mc default to empty.
   const scans: Scan[] = parsed.scans
     .filter(isScan)
-    .map((s) => ({ id: s.id, cg: s.cg, at: s.at, ops: cleanOps(s.ops), mc: cleanMc(s.mc) }));
+    .map((s) => ({
+      id: s.id,
+      cg: s.cg,
+      rawCode: typeof s.rawCode === 'string' && s.rawCode ? s.rawCode : s.cg, // saves before rawCode existed
+      at: s.at,
+      ops: cleanOps(s.ops),
+      mc: cleanMc(s.mc),
+    }));
   const ps = parsed.settings as Partial<Settings>;
   const settings: Settings = {
     agingHours: Number.isFinite(ps.agingHours) && ps.agingHours! > 0 ? ps.agingHours! : base.settings.agingHours,

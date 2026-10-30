@@ -248,9 +248,10 @@ export default function App() {
 
   // ---- receiving
 
-  const record = (cg: string) => {
+  /** `cg` is the 4-digit key; `rawCode` the full typed/scanned code stored with the scan. */
+  const record = (cg: string, rawCode: string) => {
     const s0 = ref.current.settings;
-    const next = commit((d) => addScan(d, { cg, ops: opsFromSticky(s0), mc: s0.mc }, Date.now(), newId()));
+    const next = commit((d) => addScan(d, { cg: rawCode, ops: opsFromSticky(s0), mc: s0.mc }, Date.now(), newId()));
     if (!next) return setBanner(null);
     const s = summarizeCg(next, cg)!;
     const key = Date.now();
@@ -272,17 +273,17 @@ export default function App() {
 
   const onScan = (e: FormEvent) => {
     e.preventDefault();
-    const { cg, error } = parseCg(cgInput);
+    const { cg, rawCode, error } = parseCg(cgInput);
     setCgInput('');
-    if (!cg) return focusScan();
     if (error) {
       cue('warn');
-      setBanner({ kind: 'error', cg, title: 'NOT SAVED', detail: error, key: Date.now() });
+      setBanner({ kind: 'error', cg: rawCode, title: 'NOT SAVED', detail: error, key: Date.now() });
       return focusScan();
     }
+    if (!cg) return focusScan();
     const warnings: ScanWarning[] = checkScan(ref.current, cg, Date.now());
     if (warnings.length === 0) {
-      record(cg);
+      record(cg, rawCode);
       return focusScan();
     }
     cue('warn');
@@ -290,7 +291,7 @@ export default function App() {
       title: `Check CG ${cg}`,
       lines: warnings.map((w) => w.message),
       confirmLabel: 'Save anyway',
-      onConfirm: () => record(cg),
+      onConfirm: () => record(cg, rawCode),
     });
   };
 
@@ -829,6 +830,7 @@ function CgDetail(props: {
                   <li key={scan.id}>
                     <div className="history-main">
                       <b>Cart {i + 1}</b> <span className="time">{clock(scan.at, now)}</span>
+                      {scan.rawCode !== scan.cg && <span className="raw">Barcode {scan.rawCode}</span>}
                       <div className="tags">
                         <ScanTags scan={scan} />
                       </div>
@@ -861,7 +863,8 @@ function EditScan(props: { scan: Scan; onCancel: () => void; onSave: (patch: Sca
   const original = toLocalInput(scan.at);
   const [at, setAt] = useState(original);
   const ms = fromLocalInput(at);
-  const cgOk = isValidCg(normalizeCg(cg));
+  const parsed = parseCg(cg);
+  const cgOk = !parsed.error && isValidCg(parsed.cg);
   const valid = cgOk && ms !== null;
   return (
     <li className="edit">
@@ -870,7 +873,9 @@ function EditScan(props: { scan: Scan; onCancel: () => void; onSave: (patch: Sca
         onSubmit={(e) => {
           e.preventDefault();
           if (!valid) return;
-          const patch: ScanPatch = { cg, ops: opsFromSticky({ ops, otherOn, otherText }), mc };
+          const patch: ScanPatch = { ops: opsFromSticky({ ops, otherOn, otherText }), mc };
+          // Only re-key if the CG field was changed, so the stored barcode isn't replaced by its 4 digits.
+          if (cg !== scan.cg) patch.cg = cg;
           // Only touch the time if it was edited (the input drops milliseconds,
           // and the local-time round trip is ambiguous on DST change nights).
           if (at !== original) patch.at = ms!;
@@ -881,7 +886,9 @@ function EditScan(props: { scan: Scan; onCancel: () => void; onSave: (patch: Sca
           CG
           <input className={`field${cgOk ? '' : ' bad'}`} value={cg} onChange={(e) => setCg(e.target.value)} inputMode="numeric" pattern="[0-9]*" aria-label="Edit CG" />
         </label>
-        {!cgOk && <p className="field-error">A CG is exactly 4 digits.</p>}
+        {!cgOk && <p className="field-error">Enter the 4-digit CG or the full 8000… barcode.</p>}
+        {cgOk && cg === scan.cg && scan.rawCode !== scan.cg && <p className="raw">Scanned barcode {scan.rawCode}</p>}
+        {cgOk && cg !== scan.cg && parsed.rawCode !== parsed.cg && <p className="raw">Saves as CG {parsed.cg}</p>}
         <span className="label">Ops</span>
         <OpsPicker
           ops={ops}

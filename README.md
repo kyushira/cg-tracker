@@ -16,9 +16,14 @@ which CGs are complete (all carts here, marry them up) and which are still waiti
    opens a short text box) and one **MC TYPE** (Big MC, Small MC, Open MC). They stay selected
    for every scan until you change them. Tap a selected chip again to turn it off.
 3. **Scan the CG label** into the big box (the scanner presses Enter for you; by hand, type the
-   number and tap **Receive cart**). A CG is exactly **4 digits**; anything else shows a red
-   **NOT SAVED** message with a warning buzz and is not recorded. Scanner prefix/suffix
-   characters and spaces are stripped first.
+   number and tap **Receive cart**). The team calls a CG by its **last 4 digits**:
+   - type the 4 digits (e.g. `4821`), or
+   - scan the full barcode, which starts with `8000` (e.g. `80001234821`).
+   Both are the same CG `4821`; a scan also keeps the full barcode (shown small in the scan
+   history and in the CSV `raw_code` column). Anything else (letters, fewer than 4 digits, or
+   more than 4 digits without the `8000` start) shows a red **NOT SAVED** message with a
+   warning buzz and is not recorded. Scanner prefix/suffix characters and spaces are stripped
+   first.
    - First cart: amber **PENDING 1/2**, one short beep. Stage the cart.
    - Last cart: full-screen green **COMPLETE** with a check, three-tone beep and vibration.
      Marry the carts up.
@@ -33,7 +38,8 @@ which CGs are complete (all carts here, marry them up) and which are still waiti
    - **Completed**: receive time, ops and MC type of each cart. Tap **Married & staged** or **Dispatched** to clear
      it from the active list; the filter chips (Staged / Dispatched / All) bring them back.
    - **Search**: any part of a CG number, shows status and full scan history.
-   - **More**: aging alert hours, **Download CSV** (one row per cart; `ops` column like `10;30`,
+   - **More**: aging alert hours, **Download CSV** (one row per cart; `cg` is the 4-digit key,
+     `raw_code` the full code as typed/scanned, `ops` column like `10;30`,
      `mc_type` column like `Big MC`), and **Clear all data** (type `DELETE` to confirm).
 7. Tap any CG to open it: change how many carts it expects (1-9, default 2), edit a scan's CG,
    ops, MC type or time, delete a scan, or mark it staged/dispatched.
