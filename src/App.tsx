@@ -589,7 +589,7 @@ export default function App() {
           <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>
             {icon}
             <span>{label}</span>
-            {n !== null && n > 0 && <i className={`tab-badge ${t}`}>{n}</i>}
+            {n !== null && n > 0 && <i className={`tab-badge ${t}`}>{t === 'staging' ? `+${n}` : n}</i>}
           </button>
         ))}
       </nav>
@@ -811,6 +811,9 @@ function StagingView(props: { data: AppData; all: CgSummary[]; now: number; onOp
         <span><i className="lg married" />Married</span>
         <span><i className="lg waiting" />Waiting</span>
         <span><i className="lg reserved" />Reserved for partner</span>
+        <span><i className="lg aging" />Aging</span>
+        <span><i className="lg late" />Late</span>
+        <span><i className="lg staged" />Staged</span>
         <span><i className="lg empty" />Empty</span>
       </div>
       {ROWS.map((row) => {
@@ -819,7 +822,7 @@ function StagingView(props: { data: AppData; all: CgSummary[]; now: number; onOp
           <div className="srow" key={row} data-row={row}>
             <div className="srow-label">{row}</div>
             <div className="srow-scroll">
-              <div className="srow-grid" style={{ gridTemplateColumns: `repeat(${cells.length}, minmax(30px, 1fr))` }}>
+              <div className="srow-grid" style={{ gridTemplateColumns: `repeat(${cells.length}, minmax(26px, 1fr))` }}>
                 {cells.map((c, i) => {
                   const s = c.cg ? byCg.get(c.cg) : undefined;
                   const prev = cells[i - 1];
@@ -911,7 +914,7 @@ function DatabaseView(props: {
         className="field search-input"
         value={query}
         onChange={(e) => onQuery(e.target.value)}
-        placeholder="Find CG or barcode…"
+        placeholder="CG or barcode"
         inputMode="numeric"
         aria-label="Search CG"
       />
