@@ -13,6 +13,12 @@ export const IconCheck = (p: P) => (
 export const IconSearch = (p: P) => (
   <svg {...base} {...p}><circle cx="11" cy="11" r="7" /><path d="M20 20l-4-4" /></svg>
 );
+export const IconScan = (p: P) => (
+  <svg {...base} {...p}><path d="M4 7V5a1 1 0 011-1h2M17 4h2a1 1 0 011 1v2M20 17v2a1 1 0 01-1 1h-2M7 20H5a1 1 0 01-1-1v-2M8 8v8M11 8v8M14 8v8M17 8v8" /></svg>
+);
+export const IconGrid = (p: P) => (
+  <svg {...base} {...p}><rect x="3" y="5" width="4" height="6" rx="1" /><rect x="10" y="5" width="4" height="6" rx="1" /><rect x="17" y="5" width="4" height="6" rx="1" /><rect x="3" y="14" width="4" height="6" rx="1" /><rect x="10" y="14" width="4" height="6" rx="1" /><rect x="17" y="14" width="4" height="6" rx="1" /></svg>
+);
 export const IconMore = (p: P) => (
   <svg {...base} {...p}><path d="M4 7h16M4 12h16M4 17h16" /></svg>
 );

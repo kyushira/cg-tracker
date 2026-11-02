@@ -386,3 +386,43 @@ describe('MemoryStore', () => {
     expect(store.load()).toEqual(emptyData());
   });
 });
+
+// ---------------------------------------------------------------- staging fields
+
+describe('parseData staging fields', () => {
+  const raw = (scans: unknown[], meta: unknown, settings: unknown = {}) =>
+    JSON.stringify({ version: 1, scans, meta, settings });
+
+  it('keeps a valid scan slot', () => {
+    const d = parseData(raw([{ id: 's', cg: '1001', at: T0, ops: [], mc: '', slot: 'A5' }], {}));
+    expect(d.scans[0].slot).toBe('A5');
+  });
+
+  it('drops a scan slot that is not a valid A/B slot', () => {
+    const d = parseData(raw([{ id: 's', cg: '1001', at: T0, ops: [], mc: '', slot: 'Z9' }], {}));
+    expect(d.scans[0]).not.toHaveProperty('slot');
+  });
+
+  it('keeps a valid meta block', () => {
+    const d = parseData(raw([], { '1001': { block: { row: 'A', start: 5, size: 2 } } }));
+    expect(d.meta['1001'].block).toEqual({ row: 'A', start: 5, size: 2 });
+  });
+
+  it.each([
+    ['row C', { row: 'C', start: 1, size: 2 }],
+    ['start 0', { row: 'A', start: 0, size: 2 }],
+    ['size 0', { row: 'A', start: 1, size: 0 }],
+    ['size 21', { row: 'A', start: 1, size: 21 }],
+  ])('drops a meta block with %s and keeps the rest of the CG meta', (_label, block) => {
+    const d = parseData(raw([], { '1001': { expected: 2, block } }));
+    expect(d.meta['1001']).toEqual({ expected: 2 });
+  });
+
+  it('keeps settings.slotsPerRow when it is an integer from 1 to 60', () => {
+    expect(parseData(raw([], {}, { slotsPerRow: 14 })).settings.slotsPerRow).toBe(14);
+  });
+
+  it.each([0, 61, 1.5, '12'])('drops settings.slotsPerRow of %s', (v) => {
+    expect(parseData(raw([], {}, { slotsPerRow: v })).settings).not.toHaveProperty('slotsPerRow');
+  });
+});

@@ -1033,6 +1033,7 @@ describe('toCsv', () => {
       'cart_no',
       'scanned_at_utc',
       'raw_code',
+      'slot',
       'ops',
       'mc_type',
       'cg_carts_received',
@@ -1065,27 +1066,27 @@ describe('toCsv', () => {
 
   it('writes the expected values for a complete CG row, with ops joined by ; and the mc label', () => {
     const row = toCsv(fixture()).split('\r\n')[1];
-    expect(row).toBe(['1111', '1', iso(T0), '1111', '10;30', 'Big MC', '2', '2', 'complete', iso(T0 + MIN), ''].join(','));
+    expect(row).toBe(['1111', '1', iso(T0), '1111', '', '10;30', 'Big MC', '2', '2', 'complete', iso(T0 + MIN), ''].join(','));
   });
 
   it('writes an empty completed_at for a pending CG and the Open MC label', () => {
     const row = toCsv(fixture()).split('\r\n')[3];
-    expect(row).toBe(['2222', '1', iso(T0 + 2 * MIN), '2222', '20', 'Open MC', '1', '2', 'pending', '', ''].join(','));
+    expect(row).toBe(['2222', '1', iso(T0 + 2 * MIN), '2222', '', '20', 'Open MC', '1', '2', 'pending', '', ''].join(','));
   });
 
   it('writes empty ops and mc_type cells for a scan with neither', () => {
     const data = scan(emptyData(), '1234', T0, 'a1');
     const cells = toCsv(data).split('\r\n')[1].split(',');
-    expect(cells[4]).toBe('');
     expect(cells[5]).toBe('');
+    expect(cells[6]).toBe('');
   });
 
   it('writes the staged status and marked_at timestamp', () => {
     const data = setMark(fixture(), '1111', 'staged', T0 + 5 * MIN);
     const row = toCsv(data).split('\r\n')[1];
     const cells = row.split(',');
-    expect(cells[8]).toBe('staged');
-    expect(cells[10]).toBe(iso(T0 + 5 * MIN));
+    expect(cells[9]).toBe('staged');
+    expect(cells[11]).toBe(iso(T0 + 5 * MIN));
   });
 
   it('groups rows by CG oldest CG first and numbers carts 1..n per CG', () => {
@@ -1108,6 +1109,15 @@ describe('toCsv', () => {
     expect(cells[3]).toBe('80001234821');
   });
 
+  it('writes each cart its staging slot in the slot column', () => {
+    let data = scan(emptyData(), '1111', T0, 'a1', ['10']);
+    data = scan(data, '1111', T0 + MIN, 'a2', ['10']);
+    data = { ...data, scans: data.scans.map((s) => ({ ...s, slot: s.id === 'a1' ? 'A1' : 'A2' })) };
+    const rows = toCsv(data).split('\r\n');
+    expect(rows[1].split(',')[4]).toBe('A1');
+    expect(rows[2].split(',')[4]).toBe('A2');
+  });
+
   it('quotes an ops text that contains a comma', () => {
     const data = scan(emptyData(), '1234', T0, 'a1', ['Bay 1, north']);
     const row = toCsv(data).split('\r\n')[1];
@@ -1122,7 +1132,7 @@ describe('toCsv', () => {
 
   it('leaves a plain ops value unquoted', () => {
     const data = scan(emptyData(), '1234', T0, 'a1', ['30']);
-    expect(toCsv(data).split('\r\n')[1].split(',')[4]).toBe('30');
+    expect(toCsv(data).split('\r\n')[1].split(',')[5]).toBe('30');
   });
 
   it.each(['=', '+', '-', '@'])(
@@ -1130,7 +1140,7 @@ describe('toCsv', () => {
     (lead) => {
       const text = `${lead}1+1`;
       const data = scan(emptyData(), '1234', T0, 'a1', [text]);
-      const cell = toCsv(data).split('\r\n')[1].split(',')[4];
+      const cell = toCsv(data).split('\r\n')[1].split(',')[5];
       expect(cell).toBe(`'${text}`);
     },
   );

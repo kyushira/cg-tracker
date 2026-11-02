@@ -2,7 +2,7 @@
 // directly, so a Supabase-backed store (or a local store + sync queue) can be
 // dropped in later with the same interface.
 
-import { cleanMc, cleanOps, emptyData, STANDARD_OPS, type AppData, type Scan, type Settings } from './domain';
+import { cleanMc, cleanOps, emptyData, STANDARD_OPS, type AppData, type Block, type CgMeta, type Scan, type Settings } from './domain';
 
 export interface DataStore {
   load(): AppData;
@@ -24,6 +24,18 @@ export function storageKey(pathname: string): string {
 function isAppData(x: unknown): x is AppData {
   const d = x as AppData;
   return !!d && d.version === 1 && Array.isArray(d.scans) && !!d.settings && typeof d.settings === 'object';
+}
+
+const SLOT_RE = /^[AB]\d{1,3}$/;
+
+function isBlock(b: unknown): b is Block {
+  const x = b as Block;
+  return (
+    !!x &&
+    (x.row === 'A' || x.row === 'B') &&
+    Number.isInteger(x.start) && x.start >= 1 &&
+    Number.isInteger(x.size) && x.size >= 1 && x.size <= 20
+  );
 }
 
 function isScan(x: unknown): x is Scan {
@@ -49,6 +61,7 @@ export function parseData(raw: string | null): AppData {
       at: s.at,
       ops: cleanOps(s.ops),
       mc: cleanMc(s.mc),
+      ...(typeof s.slot === 'string' && SLOT_RE.test(s.slot) ? { slot: s.slot } : {}),
     }));
   const ps = parsed.settings as Partial<Settings>;
   const settings: Settings = {
@@ -58,7 +71,17 @@ export function parseData(raw: string | null): AppData {
     otherText: typeof ps.otherText === 'string' ? ps.otherText.slice(0, 20) : '',
     mc: cleanMc(ps.mc),
   };
-  const meta = parsed.meta && typeof parsed.meta === 'object' && !Array.isArray(parsed.meta) ? parsed.meta : {};
+  if (Number.isInteger(ps.slotsPerRow) && ps.slotsPerRow! >= 1 && ps.slotsPerRow! <= 60) settings.slotsPerRow = ps.slotsPerRow;
+  // Keep per-CG metadata, dropping any staging block that isn't well formed.
+  const meta: AppData['meta'] = {};
+  const rawMeta: unknown = parsed.meta;
+  if (rawMeta && typeof rawMeta === 'object' && !Array.isArray(rawMeta)) {
+    for (const [cg, m] of Object.entries(rawMeta as Record<string, CgMeta>)) {
+      if (!m || typeof m !== 'object') continue;
+      const { block, ...rest } = m;
+      meta[cg] = isBlock(block) ? { ...rest, block } : rest;
+    }
+  }
   return { version: 1, scans, meta, settings };
 }
 

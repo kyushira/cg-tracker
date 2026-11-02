@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
-  addScan,
   agingLevel,
   checkScan,
   completedList,
   countByStatus,
-  deleteScan,
   emptyData,
   formatDuration,
   isValidCg,
@@ -21,35 +19,55 @@ import {
   pendingList,
   searchCgs,
   setAgingHours,
-  setExpected,
-  setMark,
   setSticky,
   STANDARD_OPS,
   summarizeAll,
   summarizeCg,
   toCsv,
-  updateScan,
   type AgingLevel,
   type AppData,
   type ArchiveMark,
+  type Block,
+  type CgMeta,
+  type CgStatus,
   type CgSummary,
   type McType,
   type Scan,
-  type ScanWarning,
 } from './domain';
+import {
+  blockText,
+  changeExpected,
+  editScan,
+  freeBlocks,
+  mark,
+  moveCg,
+  placementText,
+  receive,
+  removeScan,
+  ROWS,
+  setSlotsPerRow,
+  slotsNeeded,
+  slotsPerRow,
+  stagingMap,
+  stagingStats,
+  type Placement,
+} from './staging';
 import { LocalStore, newId, storageKey, type DataStore } from './storage';
 import { cue } from './feedback';
 import { clock, fileStamp, fromLocalInput, toLocalInput } from './time';
-import { IconCheck, IconClock, IconDownload, IconMore, IconSearch, IconUndo, IconX, Logo } from './icons';
+import { IconCheck, IconClock, IconDownload, IconGrid, IconMore, IconScan, IconSearch, IconUndo, IconX, Logo } from './icons';
 
-type Tab = 'pending' | 'completed' | 'search' | 'more';
+type Tab = 'receive' | 'staging' | 'search' | 'more';
+type ListView = 'pending' | 'completed';
 type DoneFilter = 'active' | ArchiveMark | 'all';
+type DbFilter = 'all' | CgStatus;
 
 interface Banner {
   kind: 'pending' | 'complete' | 'extra' | 'info' | 'error';
   cg: string;
   title: string;
   detail: string;
+  where?: string; // "Put in A5 · partner → A6"
   count?: number;
   expected?: number;
   key: number;
@@ -59,9 +77,12 @@ interface ConfirmState {
   title: string;
   lines: string[];
   confirmLabel: string;
-  danger?: boolean;
+  cancelLabel?: string;
+  tone?: 'warn' | 'danger' | 'go';
   onConfirm: () => void;
 }
+
+const ordinal = (n: number) => `${n}${n === 1 ? 'st' : n === 2 ? 'nd' : n === 3 ? 'rd' : 'th'}`;
 
 // ------------------------------------------------------------------ data hook
 
@@ -73,7 +94,14 @@ function useData(store: DataStore) {
   // Save first, then show: the screen never shows a scan that isn't stored.
   const commit = useCallback(
     (fn: (d: AppData) => AppData): AppData | null => {
-      const next = fn(ref.current);
+      let next: AppData;
+      try {
+        next = fn(ref.current);
+      } catch (e) {
+        setSaveError(`Not changed: ${(e as Error).message}`);
+        cue('warn');
+        return null;
+      }
       try {
         store.save(next);
       } catch (e) {
@@ -151,6 +179,12 @@ function ScanTags({ scan }: { scan: Pick<Scan, 'ops' | 'mc'> }) {
   );
 }
 
+/** Staging slots of a CG, while it holds them. */
+function SlotTag({ s, meta }: { s: CgSummary; meta: CgMeta | undefined }) {
+  if (s.status === 'dispatched' || !meta?.block) return null;
+  return <span className="tag slotpos">{blockText(meta.block)}</span>;
+}
+
 function OpsPicker(props: {
   ops: string[];
   otherOn: boolean;
@@ -197,6 +231,10 @@ function McPicker(props: { mc: McType | ''; onPick: (m: McType | '') => void }) 
   );
 }
 
+function slotsOf(s: CgSummary): string {
+  return s.scans.map((x) => x.slot).filter(Boolean).join(', ') || 'no slot yet';
+}
+
 // ------------------------------------------------------------------ app
 
 export default function App() {
@@ -204,8 +242,10 @@ export default function App() {
   const { data, ref, commit, saveError } = useData(store);
   const now = useNow(30_000);
 
-  const [tab, setTab] = useState<Tab>('pending');
+  const [tab, setTab] = useState<Tab>('receive');
+  const [list, setList] = useState<ListView>('pending');
   const [doneFilter, setDoneFilter] = useState<DoneFilter>('active');
+  const [dbFilter, setDbFilter] = useState<DbFilter>('all');
   const [cgInput, setCgInput] = useState('');
   const [banner, setBanner] = useState<Banner | null>(null);
   const [flash, setFlash] = useState<Banner | null>(null);
@@ -218,6 +258,7 @@ export default function App() {
   const counts = useMemo(() => countByStatus(all), [all]);
   const pending = useMemo(() => pendingList(all), [all]);
   const done = useMemo(() => completedList(all, doneFilter), [all, doneFilter]);
+  const stats = useMemo(() => stagingStats(data), [data]);
   const last = lastScan(data);
   const st = data.settings;
 
@@ -228,15 +269,16 @@ export default function App() {
   // The COMPLETE flash covers the screen briefly; it never takes focus or taps.
   useEffect(() => {
     if (!flash) return;
-    const t = window.setTimeout(() => setFlash(null), 1600);
+    const t = window.setTimeout(() => setFlash(null), 1800);
     return () => window.clearTimeout(t);
   }, [flash]);
 
-  // A handheld scanner "types" into whatever has focus. If nothing editable is
-  // focused (user tapped a chip, tab or button), send the keystrokes to the CG box.
+  // A handheld scanner "types" into whatever has focus. On the Receive screen,
+  // if nothing editable is focused (user tapped a chip or button), send the
+  // keystrokes to the CG box. Other screens never receive carts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (confirm || openCg) return;
+      if (confirm || openCg || tab !== 'receive') return;
       if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT')) return;
@@ -244,28 +286,34 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [confirm, openCg]);
+  }, [confirm, openCg, tab]);
 
   // ---- receiving
 
-  /** `cg` is the 4-digit key; `rawCode` the full typed/scanned code stored with the scan. */
+  /** `rawCode` is the typed/scanned code; the scan is keyed by its CG (last 4 digits). */
   const record = (cg: string, rawCode: string) => {
     const s0 = ref.current.settings;
-    const next = commit((d) => addScan(d, { cg: rawCode, ops: opsFromSticky(s0), mc: s0.mc }, Date.now(), newId()));
+    let placement = null as Placement | null;
+    const next = commit((d) => {
+      const r = receive(d, { cg: rawCode, ops: opsFromSticky(s0), mc: s0.mc }, Date.now(), newId());
+      placement = r.placement;
+      return r.data;
+    });
     if (!next) return setBanner(null);
     const s = summarizeCg(next, cg)!;
+    const where = placement ? placementText(placement, s.count) : undefined;
     const key = Date.now();
     let b: Banner;
     if (s.count === s.expected) {
-      b = { kind: 'complete', cg, title: 'COMPLETE', detail: 'All carts here. Marry up now.', count: s.count, expected: s.expected, key };
+      b = { kind: 'complete', cg, title: 'COMPLETE', detail: 'All carts here. Marry up now.', where, count: s.count, expected: s.expected, key };
       setFlash(b);
       cue('complete');
     } else if (s.count > s.expected) {
-      b = { kind: 'extra', cg, title: 'EXTRA CART', detail: `Saved as cart ${s.count}. Only ${s.expected} expected.`, count: s.count, expected: s.expected, key };
+      b = { kind: 'extra', cg, title: 'EXTRA CART', detail: `Saved as cart ${s.count}. Only ${s.expected} expected.`, where, count: s.count, expected: s.expected, key };
       cue('warn');
     } else {
       const left = s.expected - s.count;
-      b = { kind: 'pending', cg, title: 'PENDING', detail: `Stage it. Waiting for ${left} more cart${left > 1 ? 's' : ''}.`, count: s.count, expected: s.expected, key };
+      b = { kind: 'pending', cg, title: 'PENDING', detail: `Waiting for ${left} more cart${left > 1 ? 's' : ''}.`, where, count: s.count, expected: s.expected, key };
       cue('pending');
     }
     setBanner(b);
@@ -281,7 +329,36 @@ export default function App() {
       return focusScan();
     }
     if (!cg) return focusScan();
-    const warnings: ScanWarning[] = checkScan(ref.current, cg, Date.now());
+    const t = Date.now();
+    const s = summarizeCg(ref.current, cg);
+    const recent = checkScan(ref.current, cg, t).filter((w) => w.kind === 'recent');
+
+    // The CG already has carts but isn't complete: typing a CG is also how the
+    // floor checks whether the partner has arrived, so never save silently.
+    if (s && !s.complete) {
+      const first = s.scans[0];
+      const nth = s.count + 1;
+      const info = [
+        first.ops.length ? `ops ${first.ops.join('·')}` : 'no ops',
+        first.mc ? MC_LABEL[first.mc] : 'no MC type',
+        `waiting ${formatDuration(t - s.firstAt)}`,
+      ].join(', ');
+      cue('pending');
+      setConfirm({
+        title: `Is this the ${ordinal(nth)} MC?`,
+        lines: [
+          `CG ${cg} has ${s.count}/${s.expected} — ${s.count === 1 ? 'first half' : 'carts'} in ${slotsOf(s)} (${info}).`,
+          ...recent.map((w) => w.message),
+        ],
+        confirmLabel: nth >= s.expected ? 'COMPLETE IT' : `SAVE MC ${nth}/${s.expected}`,
+        cancelLabel: 'Just checking',
+        tone: 'go',
+        onConfirm: () => record(cg, rawCode),
+      });
+      return;
+    }
+
+    const warnings = checkScan(ref.current, cg, t);
     if (warnings.length === 0) {
       record(cg, rawCode);
       return focusScan();
@@ -291,6 +368,7 @@ export default function App() {
       title: `Check CG ${cg}`,
       lines: warnings.map((w) => w.message),
       confirmLabel: 'Save anyway',
+      tone: 'warn',
       onConfirm: () => record(cg, rawCode),
     });
   };
@@ -299,11 +377,11 @@ export default function App() {
     if (!last) return;
     setConfirm({
       title: 'Undo last scan?',
-      lines: [`CG ${last.cg} scanned at ${clock(last.at)}.`],
+      lines: [`CG ${last.cg} scanned at ${clock(last.at)}${last.slot ? ` (slot ${last.slot})` : ''}.`],
       confirmLabel: 'Undo scan',
-      danger: true,
+      tone: 'danger',
       onConfirm: () => {
-        if (!commit((d) => deleteScan(d, last.id))) return;
+        if (!commit((d) => removeScan(d, last.id))) return;
         setBanner({ kind: 'info', cg: last.cg, title: 'UNDONE', detail: `Removed the last scan of CG ${last.cg}.`, key: Date.now() });
       },
     });
@@ -311,7 +389,7 @@ export default function App() {
 
   const closeConfirm = () => {
     setConfirm(null);
-    if (!openCg) focusScan();
+    if (!openCg && tab === 'receive') focusScan();
   };
 
   const sticky = (patch: Parameters<typeof setSticky>[1]) => commit((d) => setSticky(d, patch));
@@ -333,14 +411,26 @@ export default function App() {
   const clearAll = () => {
     commit(() => emptyData());
     setBanner(null);
-    setTab('pending');
+    setTab('receive');
+  };
+
+  const goList = (v: ListView) => {
+    setTab('receive');
+    setList(v);
   };
 
   const openSummary = openCg ? summarizeCg(data, openCg) : null;
+  const openBlock = openCg ? data.meta[openCg]?.block : undefined;
+  const moveOptions =
+    openCg && openSummary && openSummary.status !== 'dispatched'
+      ? freeBlocks(data, slotsNeeded(data, openCg), openCg, 30).filter(
+          (b) => !openBlock || b.row !== openBlock.row || b.start !== openBlock.start,
+        )
+      : [];
 
   const tabs: [Tab, string, ReactNode, number | null][] = [
-    ['pending', 'Pending', <IconClock key="i" />, counts.pending],
-    ['completed', 'Completed', <IconCheck key="i" />, counts.completed],
+    ['receive', 'Receive', <IconScan key="i" />, counts.pending],
+    ['staging', 'Staging', <IconGrid key="i" />, stats.over || null],
     ['search', 'Search', <IconSearch key="i" />, null],
     ['more', 'More', <IconMore key="i" />, null],
   ];
@@ -356,11 +446,11 @@ export default function App() {
           </div>
         </div>
         <div className="counts" aria-live="polite">
-          <button className="count pending" onClick={() => setTab('pending')}>
+          <button className="count pending" onClick={() => goList('pending')}>
             <b data-testid="count-pending">{counts.pending}</b>
             <span>Pending</span>
           </button>
-          <button className="count done" onClick={() => setTab('completed')}>
+          <button className="count done" onClick={() => goList('completed')}>
             <b data-testid="count-completed">{counts.completed}</b>
             <span>Completed</span>
           </button>
@@ -370,95 +460,127 @@ export default function App() {
 
       {saveError && <div className="save-error" role="alert">{saveError}</div>}
 
-      <section className="scan card" aria-label="Receive a cart">
-        {/* noValidate: `pattern` is only there for the iOS number pad; the browser's own
-            validation must never swallow a scan (e.g. "]C1*1234*") before parseCg sees it. */}
-        <form onSubmit={onScan} autoComplete="off" noValidate>
-          <label htmlFor="cg" className="label">Scan CG</label>
-          <input
-            id="cg"
-            ref={cgRef}
-            className={`cg-input${banner?.kind === 'error' ? ' bad' : ''}`}
-            value={cgInput}
-            onChange={(e) => setCgInput(e.target.value)}
-            placeholder="0000"
-            inputMode="numeric"
-            pattern="[0-9]*"
-            enterKeyHint="done"
-            autoFocus
-            autoCapitalize="off"
-            autoCorrect="off"
-            spellCheck={false}
-          />
+      {tab === 'receive' && (
+        <section className="scan card" aria-label="Receive a cart" data-testid="receive-panel">
+          {/* noValidate: `pattern` is only there for the iOS number pad; the browser's own
+              validation must never swallow a scan (e.g. "]C1*1234*") before parseCg sees it. */}
+          <form onSubmit={onScan} autoComplete="off" noValidate>
+            <label htmlFor="cg" className="label">Scan CG</label>
+            <input
+              id="cg"
+              ref={cgRef}
+              className={`cg-input${banner?.kind === 'error' ? ' bad' : ''}`}
+              value={cgInput}
+              onChange={(e) => setCgInput(e.target.value)}
+              placeholder="0000"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              enterKeyHint="done"
+              autoFocus
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+            />
 
-          <div className="label-row">
-            <span className="label">Ops</span>
-            <span className="label-hint">pick any · stays on</span>
-          </div>
-          <OpsPicker
-            ops={st.ops}
-            otherOn={st.otherOn}
-            otherText={st.otherText}
-            onToggle={(o) => sticky({ ops: st.ops.includes(o) ? st.ops.filter((x) => x !== o) : [...st.ops, o] })}
-            onOther={(on) => sticky({ otherOn: on })}
-            onOtherText={(t) => sticky({ otherText: t })}
-          />
+            <div className="label-row">
+              <span className="label">Ops</span>
+              <span className="label-hint">pick any · stays on</span>
+            </div>
+            <OpsPicker
+              ops={st.ops}
+              otherOn={st.otherOn}
+              otherText={st.otherText}
+              onToggle={(o) => sticky({ ops: st.ops.includes(o) ? st.ops.filter((x) => x !== o) : [...st.ops, o] })}
+              onOther={(on) => sticky({ otherOn: on })}
+              onOtherText={(t) => sticky({ otherText: t })}
+            />
 
-          <div className="label-row">
-            <span className="label">MC type</span>
-            <span className="label-hint">pick one · stays on</span>
-          </div>
-          <McPicker mc={st.mc} onPick={(m) => sticky({ mc: m })} />
+            <div className="label-row">
+              <span className="label">MC type</span>
+              <span className="label-hint">pick one · stays on</span>
+            </div>
+            <McPicker mc={st.mc} onPick={(m) => sticky({ mc: m })} />
 
-          <div className="scan-actions">
-            <button type="submit" className="btn primary big">Receive cart</button>
-            <button type="button" className="btn ghost big" onClick={onUndo} disabled={!last} aria-label="Undo last scan">
-              <IconUndo /> Undo
-            </button>
-          </div>
-        </form>
+            <div className="scan-actions">
+              <button type="submit" className="btn primary big">Receive cart</button>
+              <button type="button" className="btn ghost big" onClick={onUndo} disabled={!last} aria-label="Undo last scan">
+                <IconUndo /> Undo
+              </button>
+            </div>
+          </form>
 
-        {banner && (
-          <button
-            key={banner.key}
-            className={`banner ${banner.kind}`}
-            data-testid="banner"
-            onClick={() => (banner.kind === 'error' || banner.kind === 'info' ? focusScan() : setOpenCg(banner.cg))}
-            aria-live="assertive"
-          >
-            <span className="banner-top">
-              <span className="banner-title">
-                {banner.kind === 'complete' && <IconCheck className="banner-icon" />}
-                {banner.kind === 'error' && <IconX className="banner-icon" />}
-                {banner.title}
-                {banner.count !== undefined && ` ${banner.count}/${banner.expected}`}
+          {banner && (
+            <button
+              key={banner.key}
+              className={`banner ${banner.kind}`}
+              data-testid="banner"
+              onClick={() => (banner.kind === 'error' || banner.kind === 'info' ? focusScan() : setOpenCg(banner.cg))}
+              aria-live="assertive"
+            >
+              <span className="banner-top">
+                <span className="banner-title">
+                  {banner.kind === 'complete' && <IconCheck className="banner-icon" />}
+                  {banner.kind === 'error' && <IconX className="banner-icon" />}
+                  {banner.title}
+                  {banner.count !== undefined && ` ${banner.count}/${banner.expected}`}
+                </span>
+                {banner.count !== undefined && <Slots count={banner.count} expected={banner.expected!} />}
               </span>
-              {banner.count !== undefined && <Slots count={banner.count} expected={banner.expected!} />}
-            </span>
-            {banner.kind !== 'error' && <span className="banner-cg">CG {banner.cg}</span>}
-            <span className="banner-detail">{banner.detail}</span>
-          </button>
-        )}
-      </section>
+              {banner.kind !== 'error' && <span className="banner-cg">CG {banner.cg}</span>}
+              {banner.where && <span className="banner-slot" data-testid="banner-slot">{banner.where}</span>}
+              <span className="banner-detail">{banner.detail}</span>
+            </button>
+          )}
+        </section>
+      )}
 
       <main className="panel">
-        <h2 className="panel-title">{tabs.find((t) => t[0] === tab)![1]}</h2>
-        {tab === 'pending' && (
-          <PendingView list={pending} now={now} agingHours={st.agingHours} onOpen={setOpenCg} />
+        {tab === 'receive' && (
+          <>
+            <div className="segment" role="group" aria-label="Lists">
+              <button className={list === 'pending' ? 'on' : ''} aria-pressed={list === 'pending'} onClick={() => setList('pending')}>
+                Pending <i>{counts.pending}</i>
+              </button>
+              <button className={list === 'completed' ? 'on' : ''} aria-pressed={list === 'completed'} onClick={() => setList('completed')}>
+                Completed <i>{counts.completed}</i>
+              </button>
+            </div>
+            {list === 'pending' ? (
+              <PendingView list={pending} meta={data.meta} now={now} agingHours={st.agingHours} onOpen={setOpenCg} />
+            ) : (
+              <CompletedView
+                list={done}
+                meta={data.meta}
+                filter={doneFilter}
+                counts={counts}
+                onFilter={setDoneFilter}
+                onOpen={setOpenCg}
+                onMark={(cg, m) => commit((d) => mark(d, cg, m, Date.now()))}
+              />
+            )}
+          </>
         )}
-        {tab === 'completed' && (
-          <CompletedView
-            list={done}
-            filter={doneFilter}
-            counts={counts}
-            onFilter={setDoneFilter}
+        {tab === 'staging' && <StagingView data={data} all={all} now={now} onOpen={setOpenCg} />}
+        {tab === 'search' && (
+          <DatabaseView
+            all={all}
+            meta={data.meta}
+            query={query}
+            onQuery={setQuery}
+            filter={dbFilter}
+            onFilter={setDbFilter}
             onOpen={setOpenCg}
-            onMark={(cg, m) => commit((d) => setMark(d, cg, m, Date.now()))}
+            now={now}
           />
         )}
-        {tab === 'search' && <SearchView all={all} query={query} onQuery={setQuery} onOpen={setOpenCg} />}
         {tab === 'more' && (
-          <MoreView data={data} onAging={(h) => commit((d) => setAgingHours(d, h))} onExport={exportCsv} onClear={clearAll} />
+          <MoreView
+            data={data}
+            onAging={(h) => commit((d) => setAgingHours(d, h))}
+            onSlots={(n) => commit((d) => setSlotsPerRow(d, n))}
+            onExport={exportCsv}
+            onClear={clearAll}
+          />
         )}
       </main>
 
@@ -481,6 +603,7 @@ export default function App() {
           <div className="flash-title">COMPLETE</div>
           <div className="flash-cg">CG {flash.cg}</div>
           <div className="flash-sub">{flash.count}/{flash.expected} carts · MARRY UP</div>
+          {flash.where && <div className="flash-slot">{flash.where}</div>}
         </div>
       )}
 
@@ -488,22 +611,25 @@ export default function App() {
         <CgDetail
           cg={openCg}
           summary={openSummary}
+          block={openBlock}
+          moveOptions={moveOptions}
           now={now}
           agingHours={st.agingHours}
           onClose={() => {
             setOpenCg(null);
-            focusScan();
+            if (tab === 'receive') focusScan();
           }}
-          onExpected={(n) => commit((d) => setExpected(d, openCg, n))}
-          onMark={(m) => commit((d) => setMark(d, openCg, m, Date.now()))}
-          onSaveScan={(id, patch) => commit((d) => updateScan(d, id, patch))}
+          onExpected={(n) => commit((d) => changeExpected(d, openCg, n))}
+          onMark={(m) => commit((d) => mark(d, openCg, m, Date.now()))}
+          onMove={(b) => commit((d) => moveCg(d, openCg, b))}
+          onSaveScan={(id, patch) => commit((d) => editScan(d, id, patch))}
           onDeleteScan={(scan) =>
             setConfirm({
               title: 'Delete this scan?',
-              lines: [`CG ${scan.cg}, scanned ${clock(scan.at)}.`],
+              lines: [`CG ${scan.cg}, scanned ${clock(scan.at)}${scan.slot ? `, slot ${scan.slot}` : ''}.`],
               confirmLabel: 'Delete scan',
-              danger: true,
-              onConfirm: () => commit((d) => deleteScan(d, scan.id)),
+              tone: 'danger',
+              onConfirm: () => commit((d) => removeScan(d, scan.id)),
             })
           }
         />
@@ -531,8 +657,14 @@ function Empty({ children }: { children: ReactNode }) {
 
 const AGE_TAG: Record<AgingLevel, string | null> = { ok: null, warn: 'AGING', late: 'LATE' };
 
-function PendingView(props: { list: CgSummary[]; now: number; agingHours: number; onOpen: (cg: string) => void }) {
-  const { list, now, agingHours, onOpen } = props;
+function PendingView(props: {
+  list: CgSummary[];
+  meta: AppData['meta'];
+  now: number;
+  agingHours: number;
+  onOpen: (cg: string) => void;
+}) {
+  const { list, meta, now, agingHours, onOpen } = props;
   if (list.length === 0) return <Empty>No pending CGs. Everything received is married up.</Empty>;
   return (
     <ul className="rows" data-testid="pending-list">
@@ -552,6 +684,7 @@ function PendingView(props: { list: CgSummary[]; now: number; agingHours: number
                 </span>
               </span>
               <span className="row-sub">
+                <SlotTag s={s} meta={meta[s.cg]} />
                 <span className="first">1st cart <span className="time">{clock(first.at, now)}</span></span>
                 <ScanTags scan={first} />
               </span>
@@ -577,6 +710,7 @@ function CartLines({ s, now }: { s: CgSummary; now?: number }) {
         <span className="cart-line" key={x.id}>
           <b>#{i + 1}</b>
           <span className="time">{clock(x.at, now)}</span>
+          {x.slot && s.status !== 'dispatched' && <span className="tag slotpos">{x.slot}</span>}
           <ScanTags scan={x} />
         </span>
       ))}
@@ -586,6 +720,7 @@ function CartLines({ s, now }: { s: CgSummary; now?: number }) {
 
 function CompletedView(props: {
   list: CgSummary[];
+  meta: AppData['meta'];
   filter: DoneFilter;
   counts: ReturnType<typeof countByStatus>;
   onFilter: (f: DoneFilter) => void;
@@ -628,6 +763,11 @@ function CompletedView(props: {
                     <button className="btn" onClick={() => onMark(s.cg, 'staged')}>Married &amp; staged</button>
                     <button className="btn" onClick={() => onMark(s.cg, 'dispatched')}>Dispatched</button>
                   </>
+                ) : s.status === 'staged' ? (
+                  <>
+                    <button className="btn" onClick={() => onMark(s.cg, 'dispatched')}>Dispatched</button>
+                    <button className="btn ghost" onClick={() => onMark(s.cg, null)}>Unmark</button>
+                  </>
                 ) : (
                   <button className="btn ghost" onClick={() => onMark(s.cg, null)}>
                     Unmark ({s.status} {s.markAt ? clock(s.markAt) : ''})
@@ -655,47 +795,195 @@ function statusLabel(s: CgSummary): string {
   }
 }
 
-function SearchView(props: { all: CgSummary[]; query: string; onQuery: (q: string) => void; onOpen: (cg: string) => void }) {
-  const { all, query, onQuery, onOpen } = props;
-  const results = searchCgs(all, query).slice(0, 50);
-  const q = normalizeCg(query);
+function StagingView(props: { data: AppData; all: CgSummary[]; now: number; onOpen: (cg: string) => void }) {
+  const { data, all, now, onOpen } = props;
+  const stats = stagingStats(data);
+  const map = stagingMap(data);
+  const byCg = new Map(all.map((s) => [s.cg, s]));
+  const unslotted = all.filter((s) => s.status !== 'dispatched' && !data.meta[s.cg]?.block);
   return (
     <>
-      <input
-        className="field search-input"
-        value={query}
-        onChange={(e) => onQuery(e.target.value)}
-        placeholder="Search CG…"
-        inputMode="numeric"
-        pattern="[0-9]*"
-        aria-label="Search CG"
-      />
-      {q && results.length === 0 && <Empty>CG {q} has not been received on this device.</Empty>}
-      <ul className="rows" data-testid="search-list">
-        {results.map((s) => (
-          <li key={s.cg}>
-            <button className={`row st-${s.status}`} onClick={() => onOpen(s.cg)} data-cg={s.cg}>
-              <span className="row-main">
-                <span className="cg">{s.cg}</span>
-                <Slots count={s.count} expected={s.expected} />
-                <span className={`pill ${s.status}`}>{statusLabel(s)}</span>
-              </span>
-              <CartLines s={s} />
-            </button>
-          </li>
-        ))}
-      </ul>
+      <div className={`staging-head${stats.over > 0 ? ' over' : ''}`} data-testid="staging-head">
+        Staging {stats.used}/{stats.capacity}
+        {stats.over > 0 && ` · over by ${stats.over}`}
+      </div>
+      <div className="legend" aria-hidden>
+        <span><i className="lg married" />Married</span>
+        <span><i className="lg waiting" />Waiting</span>
+        <span><i className="lg reserved" />Reserved for partner</span>
+        <span><i className="lg empty" />Empty</span>
+      </div>
+      {ROWS.map((row) => {
+        const cells = map[row];
+        return (
+          <div className="srow" key={row} data-row={row}>
+            <div className="srow-label">{row}</div>
+            <div className="srow-scroll">
+              <div className="srow-grid" style={{ gridTemplateColumns: `repeat(${cells.length}, minmax(30px, 1fr))` }}>
+                {cells.map((c, i) => {
+                  const s = c.cg ? byCg.get(c.cg) : undefined;
+                  const prev = cells[i - 1];
+                  const nxt = cells[i + 1];
+                  const cls = [
+                    'slotbox',
+                    c.cg ? (c.filled ? 'filled' : 'reserved') : 'empty',
+                    s && `st-${s.status}`,
+                    s?.status === 'pending' && `age-${agingLevel(s.firstAt, now, data.settings.agingHours)}`,
+                    c.over && 'over',
+                    c.over && !prev?.over && 'over-first',
+                    c.cg && prev?.cg === c.cg && 'join-l',
+                    c.cg && nxt?.cg === c.cg && 'join-r',
+                  ]
+                    .filter(Boolean)
+                    .join(' ');
+                  const inner = (
+                    <>
+                      <span className="sb-n">{c.n}</span>
+                      {c.cg && <span className="sb-cg">{c.cg}</span>}
+                    </>
+                  );
+                  return c.cg ? (
+                    <button
+                      key={c.label}
+                      className={cls}
+                      data-slot={c.label}
+                      data-cg={c.cg}
+                      onClick={() => onOpen(c.cg!)}
+                      aria-label={`${c.label}: CG ${c.cg}, ${c.filled ? s?.status ?? '' : 'reserved for partner'}`}
+                    >
+                      {inner}
+                    </button>
+                  ) : (
+                    <div key={c.label} className={cls} data-slot={c.label} aria-label={`${c.label}: empty`}>
+                      {inner}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      <p className="hint">Tap a slot to see the CG and move it. Slots are only freed when a CG is marked Dispatched.</p>
+      {unslotted.length > 0 && (
+        <div className="unslotted">
+          <p className="hint">Received before the staging map (no slot yet), tap to assign:</p>
+          <div className="move-grid">
+            {unslotted.map((s) => (
+              <button key={s.cg} className="btn small" onClick={() => onOpen(s.cg)}>{s.cg}</button>
+            ))}
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
-function MoreView(props: { data: AppData; onAging: (h: number) => void; onExport: () => void; onClear: () => void }) {
-  const { data, onAging, onExport, onClear } = props;
+const DB_FILTERS: [DbFilter, string][] = [
+  ['all', 'All'],
+  ['pending', 'Pending'],
+  ['complete', 'Complete'],
+  ['staged', 'Staged'],
+  ['dispatched', 'Dispatched'],
+];
+
+/** Read-only browser over every CG. Nothing here receives a cart. */
+function DatabaseView(props: {
+  all: CgSummary[];
+  meta: AppData['meta'];
+  query: string;
+  onQuery: (q: string) => void;
+  filter: DbFilter;
+  onFilter: (f: DbFilter) => void;
+  onOpen: (cg: string) => void;
+  now: number;
+}) {
+  const { all, meta, query, onQuery, filter, onFilter, onOpen, now } = props;
+  const q = normalizeCg(query);
+  const base = q ? searchCgs(all, query) : [...all].sort((a, b) => b.lastAt - a.lastAt);
+  const n: Record<DbFilter, number> = { all: base.length, pending: 0, complete: 0, staged: 0, dispatched: 0 };
+  for (const s of base) n[s.status]++;
+  const shown = base.filter((s) => filter === 'all' || s.status === filter);
+  return (
+    <>
+      <p className="hint db-note">All CGs on this device, newest first. Read only: receive carts on the Receive screen.</p>
+      <input
+        className="field search-input"
+        value={query}
+        onChange={(e) => onQuery(e.target.value)}
+        placeholder="Find CG or barcode…"
+        inputMode="numeric"
+        aria-label="Search CG"
+      />
+      <div className="filters db-filters" role="group" aria-label="Filter by status">
+        {DB_FILTERS.map(([f, label]) => (
+          <button key={f} className={filter === f ? 'on' : ''} aria-pressed={filter === f} onClick={() => onFilter(f)}>
+            {label} <i>{n[f]}</i>
+          </button>
+        ))}
+      </div>
+      {shown.length === 0 && <Empty>{q ? `No CG matching ${q}.` : 'No CGs yet.'}</Empty>}
+      <ul className="rows" data-testid="db-list">
+        {shown.slice(0, 300).map((s) => {
+          const lastScanOf = s.scans[s.scans.length - 1];
+          return (
+            <li key={s.cg}>
+              <button className={`row st-${s.status}`} onClick={() => onOpen(s.cg)} data-cg={s.cg}>
+                <span className="row-main">
+                  <span className="cg">{s.cg}</span>
+                  <Slots count={s.count} expected={s.expected} />
+                  <span className={`pill ${s.status}`}>{s.status === 'complete' ? 'Complete' : s.status}</span>
+                </span>
+                <span className="row-sub">
+                  <SlotTag s={s} meta={meta[s.cg]} />
+                  <span className="first">last <span className="time">{clock(s.lastAt, now)}</span></span>
+                  <ScanTags scan={lastScanOf} />
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {shown.length > 300 && <p className="hint small">Showing the newest 300. Search to narrow down.</p>}
+    </>
+  );
+}
+
+function MoreView(props: {
+  data: AppData;
+  onAging: (h: number) => void;
+  onSlots: (n: number) => void;
+  onExport: () => void;
+  onClear: () => void;
+}) {
+  const { data, onAging, onSlots, onExport, onClear } = props;
   const [typed, setTyped] = useState('');
   const [hours, setHours] = useState(String(data.settings.agingHours));
+  const [slots, setSlots] = useState(String(slotsPerRow(data)));
   const ok = typed.trim() === 'DELETE';
   return (
     <div className="more">
+      <section className="card">
+        <h3>Staging rows</h3>
+        <p className="hint">MC slots in each row (rows A and B). Pairs past this number overflow (A12, A13…).</p>
+        <label className="inline">
+          Slots per row
+          <input
+            className="field"
+            type="number"
+            min={1}
+            max={60}
+            step={1}
+            value={slots}
+            onChange={(e) => setSlots(e.target.value)}
+            onBlur={() => {
+              onSlots(Number(slots));
+              setSlots(String(Math.round(Number(slots)) >= 1 && Number(slots) <= 60 ? Math.round(Number(slots)) : slotsPerRow(data)));
+            }}
+            aria-label="Slots per row"
+          />
+        </label>
+      </section>
       <section className="card">
         <h3>Aging alert</h3>
         <p className="hint">Pending CGs turn orange (AGING) at 75% of this time and red (LATE) once it has passed.</p>
@@ -720,7 +1008,7 @@ function MoreView(props: { data: AppData; onAging: (h: number) => void; onExport
       </section>
       <section className="card">
         <h3>Export</h3>
-        <p className="hint">{data.scans.length} scans on this device. One CSV row per cart, with ops and MC type.</p>
+        <p className="hint">{data.scans.length} scans on this device. One CSV row per cart, with slot, ops and MC type.</p>
         <button className="btn primary big" onClick={onExport} disabled={data.scans.length === 0}>
           <IconDownload /> Download CSV
         </button>
@@ -752,16 +1040,20 @@ type ScanPatch = Partial<Pick<Scan, 'cg' | 'ops' | 'mc' | 'at'>>;
 function CgDetail(props: {
   cg: string;
   summary: CgSummary | null;
+  block: Block | undefined;
+  moveOptions: Block[];
   now: number;
   agingHours: number;
   onClose: () => void;
   onExpected: (n: number) => void;
   onMark: (m: ArchiveMark | null) => void;
+  onMove: (b: Block) => void;
   onSaveScan: (id: string, patch: ScanPatch) => void;
   onDeleteScan: (s: Scan) => void;
 }) {
-  const { cg, summary: s, now, agingHours, onClose, onExpected, onMark, onSaveScan, onDeleteScan } = props;
+  const { cg, summary: s, block, moveOptions, now, agingHours, onClose, onExpected, onMark, onMove, onSaveScan, onDeleteScan } = props;
   const [editing, setEditing] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
 
   useEffect(() => {
     // Escape closes the sheet, unless a confirm dialog is on top of it (that one handles its own Escape).
@@ -773,7 +1065,7 @@ function CgDetail(props: {
 
   return (
     <div className="sheet-backdrop" role="dialog" aria-modal="true" aria-label={`CG ${cg}`}>
-      <div className="sheet">
+      <div className="sheet" data-testid="detail">
         <div className="sheet-head">
           <h2 className="cg">CG {cg}</h2>
           <button className="btn ghost" onClick={onClose} autoFocus aria-label="Close">
@@ -793,6 +1085,43 @@ function CgDetail(props: {
               {s.status === 'pending' && <small>waiting {formatDuration(now - s.firstAt)}</small>}
             </div>
 
+            <div className="staging-info" data-testid="detail-slots">
+              <span className="label">Staging slots</span>
+              {s.status === 'dispatched' ? (
+                <p className="hint">Dispatched: its slots are free again.</p>
+              ) : block ? (
+                <div className="slot-row">
+                  <b className="slot-big">{blockText(block)}</b>
+                  <button className="btn small" onClick={() => setMoving(!moving)} aria-expanded={moving}>
+                    {moving ? 'Cancel move' : 'Move…'}
+                  </button>
+                </div>
+              ) : (
+                <div className="slot-row">
+                  <p className="hint">No slot yet (received before the staging map).</p>
+                  <button className="btn small" onClick={() => setMoving(!moving)} aria-expanded={moving}>
+                    {moving ? 'Cancel' : 'Assign…'}
+                  </button>
+                </div>
+              )}
+              {moving && s.status !== 'dispatched' && (
+                <div className="move-grid" role="group" aria-label="Free slots">
+                  {moveOptions.map((b) => (
+                    <button
+                      key={`${b.row}${b.start}`}
+                      className="btn small"
+                      onClick={() => {
+                        onMove(b);
+                        setMoving(false);
+                      }}
+                    >
+                      {blockText(b)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="stepper">
               <span>Carts expected</span>
               <button className="btn" aria-label="Fewer carts" disabled={s.expected <= MIN_EXPECTED} onClick={() => onExpected(s.expected - 1)}>−</button>
@@ -806,6 +1135,11 @@ function CgDetail(props: {
                   <>
                     <button className="btn" onClick={() => onMark('staged')}>Married &amp; staged</button>
                     <button className="btn" onClick={() => onMark('dispatched')}>Dispatched</button>
+                  </>
+                ) : s.status === 'staged' ? (
+                  <>
+                    <button className="btn" onClick={() => onMark('dispatched')}>Dispatched</button>
+                    <button className="btn ghost" onClick={() => onMark(null)}>Unmark staged</button>
                   </>
                 ) : (
                   <button className="btn ghost" onClick={() => onMark(null)}>Unmark {s.status}</button>
@@ -830,6 +1164,7 @@ function CgDetail(props: {
                   <li key={scan.id}>
                     <div className="history-main">
                       <b>Cart {i + 1}</b> <span className="time">{clock(scan.at, now)}</span>
+                      {scan.slot && s.status !== 'dispatched' && <span className="tag slotpos">Slot {scan.slot}</span>}
                       {scan.rawCode !== scan.cg && <span className="raw">Barcode {scan.rawCode}</span>}
                       <div className="tags">
                         <ScanTags scan={scan} />
@@ -915,24 +1250,33 @@ function EditScan(props: { scan: Scan; onCancel: () => void; onSave: (patch: Sca
 
 // ------------------------------------------------------------------ confirm
 
+/** Ignore taps/keys for this long after a dialog opens: a scanner that sends CR+LF
+ *  would otherwise answer the dialog with its second Enter. */
+const CONFIRM_ARM_MS = 350;
+
 function ConfirmDialog(props: { state: ConfirmState; onCancel: () => void; onConfirm: () => void }) {
   const { state, onCancel, onConfirm } = props;
+  const openedAt = useRef(performance.now());
+  const armed = () => performance.now() - openedAt.current >= CONFIRM_ARM_MS;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onCancel();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onCancel]);
+  const tone = state.tone ?? 'warn';
   return (
     <div className="sheet-backdrop confirm-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
-      <div className={`confirm${state.danger ? ' danger' : ''}`} data-testid="confirm">
+      <div className={`confirm ${tone}`} data-testid="confirm">
         <h2 id="confirm-title">{state.title}</h2>
         {state.lines.map((l) => (
           <p key={l}>{l}</p>
         ))}
         <div className="confirm-actions">
-          {/* Cancel is focused so a stray scanner Enter never confirms. */}
-          <button className="btn big" onClick={onCancel} autoFocus>Cancel</button>
-          <button className={`btn big ${state.danger ? 'danger' : 'warn'}`} onClick={onConfirm}>
+          {/* Cancel is focused so a scanner Enter never confirms. */}
+          <button className="btn big cancel" data-testid="confirm-cancel" onClick={() => armed() && onCancel()} autoFocus>
+            {state.cancelLabel ?? 'Cancel'}
+          </button>
+          <button className={`btn big ${tone}`} data-testid="confirm-ok" onClick={() => armed() && onConfirm()}>
             {state.confirmLabel}
           </button>
         </div>

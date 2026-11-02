@@ -24,28 +24,49 @@ which CGs are complete (all carts here, marry them up) and which are still waiti
    more than 4 digits without the `8000` start) shows a red **NOT SAVED** message with a
    warning buzz and is not recorded. Scanner prefix/suffix characters and spaces are stripped
    first.
-   - First cart: amber **PENDING 1/2**, one short beep. Stage the cart.
-   - Last cart: full-screen green **COMPLETE** with a check, three-tone beep and vibration.
-     Marry the carts up.
-4. The app asks before saving when:
-   - the CG already has all its carts, or
-   - the same CG was scanned in the last 60 seconds (double scan?).
-   **Cancel** is pre-selected, so an accidental scanner Enter never saves a duplicate.
-5. **Undo** removes the last scan (asks first).
+   - First cart of a new CG: saved straight away. Amber **PENDING 1/2**, one short beep, and
+     where to put it: **Put in A5 · partner → A6** (A6 is now reserved for the partner).
+   - A CG that already has carts but isn't complete is **never saved straight away**. The app
+     asks **"Is this the 2nd MC?"** and shows where the first half is (slot, ops, MC type, time
+     waiting). Tap **COMPLETE IT** to save it, or **Just checking** to save nothing. So typing a
+     CG is a safe way to check whether its partner has arrived. **Just checking** is
+     pre-selected and the dialog ignores taps/Enter for its first ⅓ second, so a scanner's Enter
+     can never complete a CG by accident.
+   - Completing cart: full-screen green **COMPLETE** with a check, three-tone beep, vibration,
+     and **Put in A6, next to its partner**. Marry the carts up.
+4. The app also asks before saving when the CG already has all its carts (an extra cart).
+   **Cancel** is pre-selected.
+5. **Undo** removes the last scan (asks first) and frees that cart's slot.
 6. Tabs (bottom bar):
-   - **Pending**: oldest first, time waiting, and the ops/MC type of the first cart. Orange
-     **AGING** = waiting 75% of the alert time (default 18h of 24h), red **LATE** = past it.
-   - **Completed**: receive time, ops and MC type of each cart. Tap **Married & staged** or **Dispatched** to clear
-     it from the active list; the filter chips (Staged / Dispatched / All) bring them back.
-   - **Search**: any part of a CG number, shows status and full scan history.
-   - **More**: aging alert hours, **Download CSV** (one row per cart; `cg` is the 4-digit key,
-     `raw_code` the full code as typed/scanned, `ops` column like `10;30`,
-     `mc_type` column like `Big MC`), and **Clear all data** (type `DELETE` to confirm).
-7. Tap any CG to open it: change how many carts it expects (1-9, default 2), edit a scan's CG,
-   ops, MC type or time, delete a scan, or mark it staged/dispatched.
+   - **Receive**: the only screen that receives carts. Below the scan box:
+     - **Pending**: oldest first, slots, time waiting, and the ops/MC type of the first cart.
+       Orange **AGING** = waiting 75% of the alert time (default 18h of 24h), red **LATE** = past it.
+     - **Completed**: receive time, slot, ops and MC type of each cart. **Married & staged**
+       keeps the carts in their slots; **Dispatched** frees the slots. The filter chips
+       (Active / Staged / Dispatched / All) show each group.
+   - **Staging**: the floor map. Rows **A** and **B**, 11 slots each by default. A pair always
+     sits side by side in one row (A5+A6), never across rows; CGs expecting 1 or 3 carts get 1
+     or 3 adjacent slots. Green = married, amber = waiting (orange/red when aging), dashed box =
+     reserved for the partner, grey = empty. When the normal slots are full, numbering carries
+     on (A12, A13…), the row scrolls sideways and the header turns orange: **Staging 24/22 ·
+     over by 2**. With 11 slots, slot 11 of each row only fits a 1-cart CG, so a pair may go to
+     overflow while A11/B11 are still empty. Slots are only freed by marking a CG
+     **Dispatched**; nothing clears on its own. Tap a slot to see the CG and **Move…** it to
+     another free slot pair.
+   - **Search**: a read-only database of every CG, newest first. Search by the 4 digits or any
+     part of a barcode, filter All / Pending / Complete / Staged / Dispatched. It cannot receive
+     carts.
+   - **More**: slots per row, aging alert hours, **Download CSV** (one row per cart; `cg` is the
+     4-digit key, `raw_code` the full code as typed/scanned, `slot` like `A5`, `ops` like
+     `10;30`, `mc_type` like `Big MC`), and **Clear all data** (type `DELETE` to confirm).
+7. Tap any CG (in any list or on the map) to open it: its slots and **Move…**, how many carts it
+   expects (1-9, default 2), edit a scan's CG, ops, MC type or time, delete a scan, or mark it
+   staged/dispatched. These correct records; they never receive a new cart.
 
 Data saved by the first test version (truck/door fields) still loads; those two fields are
-dropped and the scans show "No ops / MC".
+dropped and the scans show "No ops / MC". CGs received before the staging map have no slot;
+the Staging tab lists them so you can assign one, and the next scan of such a CG gives all its
+carts slots.
 
 Data lives only in this browser on this device (localStorage). Clearing browser data deletes
 it, so export a CSV at the end of each shift. Each preview URL keeps its own separate data.
@@ -65,6 +86,8 @@ npm run preview    # serve dist/ locally
 Code layout:
 
 - `src/domain.ts` - all rules (matching, duplicates, aging, CSV), pure functions over `AppData`.
+- `src/staging.ts` - staging map rules (slot blocks per CG, overflow, freeing on dispatch); the
+  UI calls its `receive` / `removeScan` / `mark` / `moveCg` wrappers so slots stay consistent.
 - `src/storage.ts` - `DataStore` interface plus `LocalStore` (localStorage, key namespaced by
   page path). A Supabase sync store can implement the same interface later without touching the
   rules or the UI.

@@ -32,14 +32,26 @@ export interface Scan {
   at: number; // epoch ms
   ops: string[]; // e.g. ['10', '30'] or ['10', 'Rework']
   mc: McType | '';
+  slot?: string; // staging slot the cart went into, e.g. 'A5' (set by staging.ts)
 }
 
 export type ArchiveMark = 'staged' | 'dispatched';
+
+/** Staging rows on the floor. */
+export type Row = 'A' | 'B';
+
+/** Adjacent staging slots reserved for one CG, always in one row: row+start .. row+(start+size-1). */
+export interface Block {
+  row: Row;
+  start: number; // 1-based slot number
+  size: number;
+}
 
 export interface CgMeta {
   expected?: number;
   mark?: ArchiveMark;
   markAt?: number;
+  block?: Block; // staging slots (see staging.ts); missing on data saved before the staging map
 }
 
 /** Sticky receive form: stays selected between scans. */
@@ -52,6 +64,7 @@ export interface Sticky {
 
 export interface Settings extends Sticky {
   agingHours: number;
+  slotsPerRow?: number; // staging slots per row; default in staging.ts
 }
 
 export interface AppData {
@@ -415,6 +428,7 @@ export const CSV_HEADER = [
   'cart_no',
   'scanned_at_utc',
   'raw_code',
+  'slot',
   'ops',
   'mc_type',
   'cg_carts_received',
@@ -436,6 +450,7 @@ export function toCsv(data: AppData): string {
           i + 1,
           iso(scan.at),
           scan.rawCode,
+          scan.slot ?? '',
           opsText(scan.ops),
           scan.mc ? MC_LABEL[scan.mc] : '',
           s.count,
